@@ -10,10 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"cloud.google.com/go/spanner"
 	pgxerrcode "github.com/jackc/pgerrcode"
-	spanner "github.com/storj/exp-spanner"
 	"github.com/zeebo/errs"
-	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 
 	"storj.io/common/memory"
@@ -151,7 +150,7 @@ func (s *SpannerAdapter) BeginObjectNextVersion(ctx context.Context, opts BeginO
 			return Error.Wrap(err)
 		}
 
-		stmt := spanner.Statement{
+		return Error.Wrap(txn.Query(ctx, spanner.Statement{
 			SQL: `INSERT objects (
 					project_id, bucket_name, object_key, version, stream_id,
 					expires_at, encryption,
@@ -182,22 +181,9 @@ func (s *SpannerAdapter) BeginObjectNextVersion(ctx context.Context, opts BeginO
 				"encrypted_metadata_nonce":         opts.EncryptedMetadataNonce,
 				"encrypted_metadata_encrypted_key": opts.EncryptedMetadataEncryptedKey,
 			},
-		}
-		updateIter := txn.Query(ctx, stmt)
-		defer updateIter.Stop()
-		for {
-			row, err := updateIter.Next()
-			if errors.Is(err, iterator.Done) {
-				break
-			}
-			if err != nil {
-				return Error.Wrap(err)
-			}
-			if err := row.Columns(&object.Status, &object.Version, &object.CreatedAt); err != nil {
-				return Error.Wrap(err)
-			}
-		}
-		return nil
+		}).Do(func(row *spanner.Row) error {
+			return Error.Wrap(row.Columns(&object.Status, &object.Version, &object.CreatedAt))
+		}))
 	})
 	return err
 }
@@ -306,7 +292,7 @@ func (p *PostgresAdapter) TestingBeginObjectExactVersion(ctx context.Context, op
 // TestingBeginObjectExactVersion implements Adapter.
 func (s *SpannerAdapter) TestingBeginObjectExactVersion(ctx context.Context, opts BeginObjectExactVersion, object *Object) error {
 	_, err := s.client.ReadWriteTransaction(ctx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
-		stmt := spanner.Statement{
+		err := txn.Query(ctx, spanner.Statement{
 			SQL: `INSERT INTO objects (
 				project_id, bucket_name, object_key, version, stream_id,
 				expires_at, encryption,
@@ -331,23 +317,17 @@ func (s *SpannerAdapter) TestingBeginObjectExactVersion(ctx context.Context, opt
 				"encrypted_metadata_nonce":         opts.EncryptedMetadataNonce,
 				"encrypted_metadata_encrypted_key": opts.EncryptedMetadataEncryptedKey,
 			},
-		}
-		updateIter := txn.Query(ctx, stmt)
-		defer updateIter.Stop()
+		}).Do(func(row *spanner.Row) error {
+			return Error.Wrap(row.Columns(&object.Status, &object.CreatedAt))
+		})
 
-		row, err := updateIter.Next()
 		if err != nil {
-			if errors.Is(err, iterator.Done) {
-				return Error.New("no status returned for inserted object??")
-			}
 			if errCode := spanner.ErrCode(err); errCode == codes.AlreadyExists {
 				return Error.Wrap(ErrObjectAlreadyExists.New(""))
 			}
 			return Error.Wrap(err)
 		}
-		if err := row.Columns(&object.Status, &object.CreatedAt); err != nil {
-			return Error.Wrap(err)
-		}
+
 		return nil
 	})
 	return err
@@ -418,7 +398,7 @@ func (p *PostgresAdapter) PendingObjectExists(ctx context.Context, opts BeginSeg
 
 // PendingObjectExists checks whether an object already exists.
 func (s *SpannerAdapter) PendingObjectExists(ctx context.Context, opts BeginSegment) (exists bool, err error) {
-	result := s.client.Single().Query(ctx, spanner.Statement{
+	err = s.client.Single().Query(ctx, spanner.Statement{
 		SQL: `
 			SELECT EXISTS (
 				SELECT 1
@@ -439,21 +419,10 @@ func (s *SpannerAdapter) PendingObjectExists(ctx context.Context, opts BeginSegm
 			"version":     opts.Version,
 			"stream_id":   opts.StreamID,
 		},
+	}).Do(func(row *spanner.Row) error {
+		return Error.Wrap(row.Columns(&exists))
 	})
-	defer result.Stop()
-	for {
-		row, err := result.Next()
-		if errors.Is(err, iterator.Done) {
-			break
-		}
-		if err != nil {
-			return false, Error.Wrap(err)
-		}
-		if err := row.Columns(&exists); err != nil {
-			return false, Error.Wrap(err)
-		}
-	}
-	return exists, nil
+	return exists, Error.Wrap(err)
 }
 
 // CommitSegment contains all necessary information about the segment.
@@ -971,7 +940,7 @@ func (p *CockroachAdapter) CommitInlineSegment(ctx context.Context, opts CommitI
 // CommitInlineSegment commits inline segment to the database.
 func (s *SpannerAdapter) CommitInlineSegment(ctx context.Context, opts CommitInlineSegment) (err error) {
 	_, err = s.client.ReadWriteTransaction(ctx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
-		stmt := spanner.Statement{
+		_, err := txn.Update(ctx, spanner.Statement{
 			SQL: `
 				INSERT OR UPDATE INTO segments (
 					stream_id, position, expires_at,
@@ -1007,9 +976,8 @@ func (s *SpannerAdapter) CommitInlineSegment(ctx context.Context, opts CommitInl
 				"version":             opts.Version,
 				"stream_id":           opts.StreamID,
 			},
-		}
-		_, err := txn.Update(ctx, stmt)
-		return err
+		})
+		return Error.Wrap(err)
 	})
 	if err != nil {
 		if code := spanner.ErrCode(err); code == codes.FailedPrecondition {
@@ -1245,6 +1213,7 @@ func (stx *spannerTransactionAdapter) finalizeObjectCommit(ctx context.Context, 
 
 	requestedEncryptionParameters := opts.Encryption
 	var (
+		deleted                          bool
 		oldEncryptedMetadata             []byte
 		oldEncryptedMetadataEncryptedKey []byte
 		oldEncryptedMetadataNonce        []byte
@@ -1254,9 +1223,8 @@ func (stx *spannerTransactionAdapter) finalizeObjectCommit(ctx context.Context, 
 	// We can not simply UPDATE the row, because we are changing the 'version' column,
 	// which is part of the primary key. Spanner does not allow changing a primary key
 	// column on an existing row. We must DELETE then INSERT a new row.
-	err = func() error {
-		result := stx.tx.Query(ctx, spanner.Statement{
-			SQL: `
+	err = stx.tx.Query(ctx, spanner.Statement{
+		SQL: `
 				DELETE FROM objects
 				WHERE
 					project_id      = @project_id
@@ -1270,32 +1238,26 @@ func (stx *spannerTransactionAdapter) finalizeObjectCommit(ctx context.Context, 
 					encrypted_metadata, encrypted_metadata_encrypted_key, encrypted_metadata_nonce,
 					encryption
 			`,
-			Params: map[string]interface{}{
-				"project_id":  opts.ProjectID,
-				"bucket_name": opts.BucketName,
-				"object_key":  opts.ObjectKey,
-				"version":     opts.Version,
-				"stream_id":   opts.StreamID,
-			},
-		})
-		defer result.Stop()
-
-		row, err := result.Next()
-		if err != nil {
-			if errors.Is(err, iterator.Done) {
-				return ErrObjectNotFound.Wrap(Error.New("object with specified version and pending status is missing"))
-			}
-			return Error.New("failed to delete old object row: %w", err)
-		}
-		err = row.Columns(
+		Params: map[string]interface{}{
+			"project_id":  opts.ProjectID,
+			"bucket_name": opts.BucketName,
+			"object_key":  opts.ObjectKey,
+			"version":     opts.Version,
+			"stream_id":   opts.StreamID,
+		},
+	}).Do(func(row *spanner.Row) error {
+		deleted = true
+		return Error.Wrap(row.Columns(
 			&object.CreatedAt, &object.ExpiresAt,
 			&oldEncryptedMetadata, &oldEncryptedMetadataEncryptedKey, &oldEncryptedMetadataNonce,
 			encryptionParameters{&oldEncryptionParameters},
-		)
-		return Error.Wrap(err)
-	}()
+		))
+	})
 	if err != nil {
-		return err
+		return Error.New("failed to delete old object row: %w", err)
+	}
+	if !deleted {
+		return ErrObjectNotFound.Wrap(Error.New("object with specified version and pending status is missing"))
 	}
 
 	// TODO should we allow to override existing encryption parameters or return error if don't match with opts?
@@ -1554,6 +1516,85 @@ func (ptx *postgresTransactionAdapter) finalizeInlineObjectCommit(ctx context.Co
 }
 
 func (stx *spannerTransactionAdapter) finalizeInlineObjectCommit(ctx context.Context, object *Object, segment *Segment) (err error) {
-	// TODO: implement me
-	panic("implement me")
+	defer mon.Task()(&ctx)(&err)
+
+	// TODO(spanner) should we perform these two inserts as a Migration
+	err = stx.tx.Query(ctx, spanner.Statement{
+		SQL: `
+			INSERT INTO objects (
+				project_id, bucket_name, object_key, version, stream_id,
+				status, segment_count, expires_at, encryption,
+				total_plain_size, total_encrypted_size,
+				zombie_deletion_deadline,
+				encrypted_metadata, encrypted_metadata_nonce, encrypted_metadata_encrypted_key
+			) VALUES (
+				@project_id, @bucket_name, @object_key, @version, @stream_id,
+				@status, @segment_count, @expires_at, @encryption_parameters,
+				@total_plain_size, @total_encrypted_size,
+				@zombie_deletion_deadline,
+				@encrypted_metadata, @encrypted_metadata_nonce, @encrypted_metadata_encrypted_key
+			)
+			THEN RETURN created_at
+		`,
+		Params: map[string]interface{}{
+			"project_id":                       object.ProjectID,
+			"bucket_name":                      object.BucketName,
+			"object_key":                       []byte(object.ObjectKey),
+			"version":                          object.Version,
+			"stream_id":                        object.StreamID,
+			"status":                           object.Status,
+			"segment_count":                    int64(object.SegmentCount),
+			"expires_at":                       object.ExpiresAt,
+			"encryption_parameters":            encryptionParameters{&object.Encryption},
+			"total_plain_size":                 object.TotalPlainSize,
+			"total_encrypted_size":             object.TotalEncryptedSize,
+			"zombie_deletion_deadline":         nil,
+			"encrypted_metadata":               object.EncryptedMetadata,
+			"encrypted_metadata_nonce":         object.EncryptedMetadataNonce,
+			"encrypted_metadata_encrypted_key": object.EncryptedMetadataEncryptedKey,
+		},
+	}).Do(func(row *spanner.Row) error {
+		err := row.Columns(&object.CreatedAt)
+		if err != nil {
+			return Error.New("failed to read object created_at: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return Error.New("failed to create object: %w", err)
+	}
+
+	// TODO consider not inserting segment if inline data is empty
+	_, err = stx.tx.Update(ctx, spanner.Statement{
+		SQL: `
+			INSERT INTO segments (
+				stream_id, position, expires_at,
+				root_piece_id, encrypted_key_nonce, encrypted_key,
+				encrypted_size, encrypted_etag, plain_size, plain_offset,
+				inline_data
+			) VALUES (
+				@stream_id, @position, @expires_at,
+				@root_piece_id, @encrypted_key_nonce, @encrypted_key,
+				@encrypted_size, @encrypted_etag, @plain_size, 0, -- plain_offset is 0
+				@inline_data
+			)
+		`,
+		Params: map[string]interface{}{
+			"stream_id":           segment.StreamID,
+			"position":            segment.Position,
+			"expires_at":          segment.ExpiresAt,
+			"root_piece_id":       storj.PieceID{},
+			"encrypted_key_nonce": segment.EncryptedKeyNonce,
+			"encrypted_key":       segment.EncryptedKey,
+			"encrypted_size":      int64(segment.EncryptedSize),
+			"encrypted_etag":      segment.EncryptedETag,
+			"plain_size":          int64(segment.PlainSize),
+			"inline_data":         segment.InlineData,
+		},
+	})
+	if err != nil {
+		return Error.New("failed to create segment: %w", err)
+	}
+
+	return nil
 }

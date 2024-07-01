@@ -12,11 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"cloud.google.com/go/spanner"
+	database "cloud.google.com/go/spanner/admin/database/apiv1"
 	"cloud.google.com/go/spanner/admin/database/apiv1/databasepb"
 	_ "github.com/jackc/pgx/v5"        // registers pgx as a tagsql driver.
 	_ "github.com/jackc/pgx/v5/stdlib" // registers pgx as a tagsql driver.
 	"github.com/spacemonkeygo/monkit/v3"
-	database "github.com/storj/exp-spanner/admin/database/apiv1"
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 
@@ -26,6 +27,7 @@ import (
 	"storj.io/storj/private/migrate"
 	"storj.io/storj/shared/dbutil"
 	"storj.io/storj/shared/dbutil/pgutil"
+	"storj.io/storj/shared/dbutil/spannerutil"
 	"storj.io/storj/shared/tagsql"
 )
 
@@ -43,6 +45,8 @@ type Config struct {
 	ServerSideCopy         bool
 	ServerSideCopyDisabled bool
 	UseListObjectsIterator bool
+
+	NodeAliasCacheFullRefresh bool
 
 	TestingUniqueUnversioned   bool
 	TestingCommitSegmentMode   string
@@ -109,7 +113,7 @@ func Open(ctx context.Context, log *zap.Logger, connstr string, config Config) (
 		testCleanup: func() error { return nil },
 		config:      config,
 	}
-	db.aliasCache = NewNodeAliasCache(db)
+	db.aliasCache = NewNodeAliasCache(db, config.NodeAliasCacheFullRefresh)
 	switch impl {
 	case dbutil.Postgres:
 		db.adapters = []Adapter{&PostgresAdapter{
@@ -159,9 +163,35 @@ func (db *DB) ChooseAdapter(projectID uuid.UUID) Adapter {
 // TODO: remove.
 func (db *DB) UnderlyingTagSQL() tagsql.DB { return db.db }
 
-// Ping checks whether connection has been established.
+// Ping checks whether connection has been established to all adapters.
 func (db *DB) Ping(ctx context.Context) error {
-	return Error.Wrap(db.db.PingContext(ctx))
+	for _, adapter := range db.adapters {
+		err := adapter.Ping(ctx)
+		if err != nil {
+			return Error.Wrap(err)
+		}
+	}
+	return nil
+}
+
+// Ping checks whether connection has been established.
+func (p *PostgresAdapter) Ping(ctx context.Context) error {
+	return p.db.PingContext(ctx)
+}
+
+// Ping checks whether connection has been established.
+func (s *SpannerAdapter) Ping(ctx context.Context) error {
+	ok, err := spannerutil.CollectRow(s.client.Single().Query(ctx, spanner.Statement{SQL: `SELECT true`}),
+		func(row *spanner.Row, item *bool) error {
+			return row.Columns(item)
+		})
+	if err != nil {
+		return Error.Wrap(err)
+	}
+	if !ok {
+		return Error.New("up is down, left is right, true is false, and forwards is backwards")
+	}
+	return nil
 }
 
 // TestingSetCleanup is used to set the callback for cleaning up test database.
@@ -269,7 +299,7 @@ func (db *DB) TestMigrateToLatest(ctx context.Context) error {
 
 						zombie_deletion_deadline TIMESTAMPTZ default now() + '1 day',
 
-						retention_mode INT2 NOT NULL default 0,
+						retention_mode INT2,
 						retain_until   TIMESTAMPTZ,
 
 						PRIMARY KEY (project_id, bucket_name, object_key, version)
@@ -300,7 +330,7 @@ func (db *DB) TestMigrateToLatest(ctx context.Context) error {
 
 					COMMENT ON COLUMN objects.zombie_deletion_deadline is 'zombie_deletion_deadline defines when a pending object can be deleted due to a failed upload.';
 
-					COMMENT ON COLUMN objects.retention_mode is 'retention_mode specifies an object version''s retention mode: 0=none, and 1=compliance.';
+					COMMENT ON COLUMN objects.retention_mode is 'retention_mode specifies an object version''s retention mode: NULL/0=none, and 1=compliance.';
 					COMMENT ON COLUMN objects.retain_until   is 'retain_until specifies when an object version''s retention period ends.';
 
 					CREATE TABLE segments (
@@ -451,7 +481,7 @@ func (db *DB) MigrateToLatest(ctx context.Context) error {
 
 // CheckVersion checks the database is the correct version.
 func (db *DB) CheckVersion(ctx context.Context) error {
-	// TODO: migration version is not yet supported
+	// TODO(spanner): migration version is not yet supported
 	if db.impl == dbutil.Spanner {
 		return nil
 	}
@@ -762,10 +792,10 @@ func (db *DB) PostgresMigration() *migrate.Migration {
 				Description: "add retention_mode and retain_until columns to objects table",
 				Version:     19,
 				Action: migrate.SQL{
-					`ALTER TABLE objects ADD COLUMN retention_mode INT2 NOT NULL default 0`,
+					`ALTER TABLE objects ADD COLUMN retention_mode INT2`,
 					`ALTER TABLE objects ADD COLUMN retain_until TIMESTAMPTZ`,
 					`
-					COMMENT ON COLUMN objects.retention_mode is 'retention_mode specifies an object version''s retention mode: 0=none, and 1=compliance.';
+					COMMENT ON COLUMN objects.retention_mode is 'retention_mode specifies an object version''s retention mode: NULL/0=none, and 1=compliance.';
 					COMMENT ON COLUMN objects.retain_until   is 'retain_until specifies when an object version''s retention period ends.';
 				`},
 			},
@@ -838,18 +868,34 @@ func (pq postgresRebind) Rebind(sql string) string {
 	return string(out)
 }
 
-// Now returns time on the database.
+// Now returns the current time according to the first database adapter.
+// TODO(spanner): require callers to specify a projectID or adapter name to select which adapter they care about.
 func (db *DB) Now(ctx context.Context) (time.Time, error) {
+	return db.adapters[0].Now(ctx)
+}
+
+// Now returns the current time according to the database.
+func (p *PostgresAdapter) Now(ctx context.Context) (time.Time, error) {
 	var t time.Time
-	err := db.db.QueryRowContext(ctx, `SELECT now()`).Scan(&t)
+	err := p.db.QueryRowContext(ctx, `SELECT now()`).Scan(&t)
 	return t, Error.Wrap(err)
+}
+
+// Now returns the current time according to the database.
+func (s *SpannerAdapter) Now(ctx context.Context) (time.Time, error) {
+	return spannerutil.CollectRow(
+		s.client.Single().Query(ctx, spanner.Statement{SQL: `SELECT CURRENT_TIMESTAMP`}),
+		func(row *spanner.Row, now *time.Time) error {
+			return row.Columns(now)
+		},
+	)
 }
 
 func (db *DB) asOfTime(asOfSystemTime time.Time, asOfSystemInterval time.Duration) string {
 	return LimitedAsOfSystemTime(db.impl, time.Now(), asOfSystemTime, asOfSystemInterval)
 }
 
-// LimitedAsOfSystemTime returns a SQL squery for AS OF SYSTEM TIME.
+// LimitedAsOfSystemTime returns a SQL query clause for AS OF SYSTEM TIME.
 func LimitedAsOfSystemTime(impl dbutil.Implementation, now, baseline time.Time, maxInterval time.Duration) string {
 	if baseline.IsZero() || now.IsZero() {
 		return impl.AsOfSystemInterval(maxInterval)

@@ -64,8 +64,17 @@
 # the default timeout for the hubspot http client
 # analytics.hub-spot.default-timeout: 10s
 
+# the prefix for the event name
+# analytics.hub-spot.event-prefix: ""
+
+# the hubspot lifecycle stage for new accounts
+# analytics.hub-spot.life-cycle-stage: ""
+
 # hubspot refresh token
 # analytics.hub-spot.refresh-token: ""
+
+# the hubspot form ID for signup
+# analytics.hub-spot.signup-form-id: ""
 
 # hubspot token refresh API
 # analytics.hub-spot.token-api: https://api.hubapi.com/oauth/v1/token
@@ -331,6 +340,9 @@ compensation.withheld-percents: 75,75,75,50,50,50,25,25,25,0,0,0,0,0,0
 # url link to documentation
 # console.documentation-url: https://docs.storj.io/
 
+# whether change user email flow is enabled
+# console.email-change-flow-enabled: false
+
 # whether emission impact view should be shown
 # console.emission-impact-view-enabled: false
 
@@ -406,6 +418,9 @@ compensation.withheld-percents: 75,75,75,50,50,50,25,25,25,0,0,0,0,0,0
 # whether new application setup flow should be used
 # console.new-app-setup-flow-enabled: false
 
+# whether to show unlimited-limits UI for pro users
+# console.no-limits-ui-enabled: false
+
 # how long oauth access tokens are issued for
 # console.oauth-access-token-expiry: 24h0m0s
 
@@ -477,6 +492,9 @@ compensation.withheld-percents: 75,75,75,50,50,50,25,25,25,0,0,0,0,0,0
 
 # url link to schedule a meeting with a storj representative
 # console.schedule-meeting-url: https://meetings.hubspot.com/tom144/free-trial
+
+# whether self-serve account delete flow is enabled
+# console.self-serve-account-delete-enabled: false
 
 # used to communicate with web crawlers and other web robots
 # console.seo: "User-agent: *\nDisallow: \nDisallow: /cgi-bin/"
@@ -763,17 +781,23 @@ contact.external-address: ""
 # how frequently to check uptime ratio of gracefully-exiting nodes
 # graceful-exit.offline-check-interval: 30m0s
 
+# The address to listen on for health check server
+# health-check.address: :10500
+
+# Whether the health check server is enabled
+# health-check.enabled: false
+
 # path to the certificate chain for this identity
 identity.cert-path: /root/.local/share/storj/identity/satellite/identity.cert
 
 # path to the private key for this identity
 identity.key-path: /root/.local/share/storj/identity/satellite/identity.key
 
-# checksum of the master key in Google Secret Manager
-# key-management.secret-checksum: 0
+# the key ID to use for passphrase encryption.
+# key-management.default-master-key: 1
 
-# version name of the master key in Google Secret Manager. E.g.: projects/{projectID}/secrets/{secretName}/versions/{latest}
-# key-management.secret-version: ""
+# semicolon-separated key-id:version,checksum.
+# key-management.key-infos: ""
 
 # as of system interval
 # live-accounting.as-of-system-interval: -10s
@@ -865,6 +889,9 @@ identity.key-path: /root/.local/share/storj/identity/satellite/identity.key
 # minimum remote segment size
 # metainfo.min-remote-segment-size: 1.2 KiB
 
+# node alias cache does a full refresh when a value is missing
+# metainfo.node-alias-cache-full-refresh: false
+
 # toggle flag if overlay is enabled
 # metainfo.overlay: true
 
@@ -921,6 +948,9 @@ identity.key-path: /root/.local/share/storj/identity/satellite/identity.key
 
 # how often we can upload to the single object (the same location) per API instance
 # metainfo.upload-limiter.single-object-limit: 1s
+
+# enable the use of bucket-level Object Lock
+# metainfo.use-bucket-level-object-lock: false
 
 # enable the use of bucket level object versioning
 # metainfo.use-bucket-level-object-versioning: false
@@ -1098,9 +1128,6 @@ identity.key-path: /root/.local/share/storj/identity/satellite/identity.key
 
 # toggle autoadvance feature for invoice creation
 # payments.stripe-coin-payments.auto-advance: false
-
-# whether to use users upgrade time and skip free tier status in billing process
-# payments.stripe-coin-payments.enable-free-trial-logic: false
 
 # the maximum number of concurrent Stripe API calls in invoicing methods
 # payments.stripe-coin-payments.max-parallel-calls: 10

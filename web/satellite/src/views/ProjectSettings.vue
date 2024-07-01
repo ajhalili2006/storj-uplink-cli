@@ -13,7 +13,7 @@
         </v-row>
 
         <v-row>
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Project Name">
                     <v-card-text>
                         <v-chip color="default" variant="tonal" size="small" class="font-weight-bold">
@@ -26,7 +26,7 @@
                     </v-card-text>
                 </v-card>
             </v-col>
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Project Description">
                     <v-card-text>
                         <v-chip color="default" variant="tonal" size="small" class="font-weight-bold">
@@ -39,7 +39,7 @@
                     </v-card-text>
                 </v-card>
             </v-col>
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Delete Project">
                     <v-card-text>
                         <v-chip color="default" variant="tonal" size="small" class="font-weight-bold" disabled>
@@ -79,11 +79,11 @@
         </v-row>
 
         <v-row v-else>
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Storage Limit">
                     <v-card-subtitle>
                         Storage Limit: {{ storageLimitFormatted }} <br>
-                        Available Storage: {{ paidStorageLimitFormatted }}
+                        <span v-if="!noLimitsUiEnabled">Available Storage: {{ paidStorageLimitFormatted }}</span>
                     </v-card-subtitle>
                     <v-card-text>
                         <v-divider class="mb-4" />
@@ -94,11 +94,11 @@
                 </v-card>
             </v-col>
 
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Download Limit">
                     <v-card-subtitle>
-                        Download Limit: {{ bandwidthLimitFormatted }} per month<br>
-                        Available Download: {{ paidBandwidthLimitFormatted }} per month
+                        Download Limit: {{ bandwidthLimitFormatted }} {{ bandwidthLimitFormatted === 'No Limit' ? '' : 'per month' }}<br>
+                        <span v-if="!noLimitsUiEnabled">Available Download: {{ paidBandwidthLimitFormatted }} per month</span>
                     </v-card-subtitle>
                     <v-card-text>
                         <v-divider class="mb-4" />
@@ -109,7 +109,7 @@
                 </v-card>
             </v-col>
 
-            <v-col cols="12" lg="4">
+            <v-col v-if="!noLimitsUiEnabled" cols="12" sm="6" lg="4">
                 <v-card title="Account Limits">
                     <v-card-subtitle>
                         Storage limit: {{ paidStorageLimitFormatted }} <br>
@@ -133,6 +133,39 @@
                 </v-card>
             </v-col>
         </v-row>
+
+        <template v-if="promptForVersioningBeta || versioningUIEnabled">
+            <v-row>
+                <v-col>
+                    <h3 class="mt-5">Features</h3>
+                </v-col>
+            </v-row>
+
+            <v-row>
+                <v-col cols="12" sm="6" lg="4">
+                    <v-card title="Object Versioning">
+                        <v-card-subtitle v-if="versioningUIEnabled">
+                            Versioning (beta) is enabled for this project.
+                        </v-card-subtitle>
+                        <v-card-subtitle v-else>
+                            Enable object versioning (beta) on this project.
+                        </v-card-subtitle>
+
+                        <v-card-text>
+                            <v-divider class="mb-4" />
+                            <v-btn v-if="allowVersioningToggle" color="primary" size="small">
+                                Learn More
+                                <versioning-beta-dialog v-model="isVersioningDialogShown" />
+                            </v-btn>
+                            <v-btn v-else-if="versioningUIEnabled" :append-icon="mdiInformationOutline" color="primary" size="small">
+                                Enabled
+                                <versioning-beta-dialog info />
+                            </v-btn>
+                        </v-card-text>
+                    </v-card>
+                </v-col>
+            </v-row>
+        </template>
     </v-container>
 
     <edit-project-details-dialog v-model="isEditDetailsDialogShown" :field="fieldToChange" />
@@ -140,7 +173,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import {
     VContainer,
     VCard,
@@ -153,7 +186,7 @@ import {
     VIcon,
     VChip,
 } from 'vuetify/components';
-import { mdiOpenInNew, mdiArrowRight } from '@mdi/js';
+import { mdiOpenInNew, mdiArrowRight, mdiInformationOutline } from '@mdi/js';
 
 import { useProjectsStore } from '@/store/modules/projectsStore';
 import { FieldToChange, LimitToChange, Project } from '@/types/projects';
@@ -171,9 +204,12 @@ import EditProjectLimitDialog from '@/components/dialogs/EditProjectLimitDialog.
 import PageTitleComponent from '@/components/PageTitleComponent.vue';
 import PageSubtitleComponent from '@/components/PageSubtitleComponent.vue';
 import TrialExpirationBanner from '@/components/TrialExpirationBanner.vue';
+import VersioningBetaDialog from '@/components/dialogs/VersioningBetaDialog.vue';
 
 const isEditDetailsDialogShown = ref<boolean>(false);
 const isEditLimitDialogShown = ref<boolean>(false);
+const isVersioningDialogShown = ref<boolean>(false);
+const allowVersioningToggle = ref<boolean>(false);
 const fieldToChange = ref<FieldToChange>(FieldToChange.Name);
 const limitToChange = ref<LimitToChange>(LimitToChange.Storage);
 
@@ -184,6 +220,13 @@ const configStore = useConfigStore();
 
 const notify = useNotify();
 const { isTrialExpirationBanner, isUserProjectOwner, isExpired } = useTrialCheck();
+
+/**
+ * Whether the new no-limits UI is enabled.
+ */
+const noLimitsUiEnabled = computed((): boolean => {
+    return configStore.state.config.noLimitsUiEnabled;
+});
 
 /**
  * Indicates if billing features are enabled.
@@ -197,6 +240,13 @@ const project = computed<Project>(() => {
     return projectsStore.state.selectedProject;
 });
 
+const promptForVersioningBeta = computed<boolean>(() => projectsStore.promptForVersioningBeta);
+
+/**
+ * Whether versioning has been enabled for current project.
+ */
+const versioningUIEnabled = computed(() => projectsStore.versioningUIEnabled);
+
 /**
  * Returns user's paid tier status from store.
  */
@@ -205,17 +255,28 @@ const isPaidTier = computed<boolean>(() => {
 });
 
 /**
+ * Returns the current project limits from store.
+ */
+const currentLimits = computed(() => projectsStore.state.currentLimits);
+
+/**
  * Returns formatted storage limit.
  */
 const storageLimitFormatted = computed<string>(() => {
-    return formatLimit(projectsStore.state.currentLimits.storageLimit);
+    if (isPaidTier.value && noLimitsUiEnabled.value && !currentLimits.value.userSetStorageLimit) {
+        return 'No Limit';
+    }
+    return formatLimit(currentLimits.value.userSetStorageLimit || currentLimits.value.storageLimit);
 });
 
 /**
  * Returns formatted bandwidth limit.
  */
 const bandwidthLimitFormatted = computed<string>(() => {
-    return formatLimit(projectsStore.state.currentLimits.bandwidthLimit);
+    if (isPaidTier.value && noLimitsUiEnabled.value && !currentLimits.value.userSetBandwidthLimit) {
+        return 'No Limit';
+    }
+    return formatLimit(currentLimits.value.userSetBandwidthLimit || currentLimits.value.bandwidthLimit);
 });
 
 /**
@@ -310,4 +371,13 @@ onMounted(async () => {
         notify.error(`Error fetching project limits. ${error.message}`, AnalyticsErrorEventSource.PROJECT_SETTINGS_AREA);
     }
 });
+
+watch(() => [projectsStore.promptForVersioningBeta, isVersioningDialogShown.value], (values) => {
+    if (values[0] && !allowVersioningToggle.value) {
+        allowVersioningToggle.value = true;
+    } else if (!values[0] && !values[1] && allowVersioningToggle.value) {
+        // throttle the banner dismissal for the dialog close animation.
+        setTimeout(() => allowVersioningToggle.value = false, 500);
+    }
+}, { immediate: true });
 </script>

@@ -29,6 +29,8 @@ type Users interface {
 	GetExpiresBeforeWithStatus(ctx context.Context, notificationStatus TrialNotificationStatus, expiresBefore time.Time) ([]*User, error)
 	// GetUnverifiedNeedingReminder gets unverified users needing a reminder to verify their email.
 	GetUnverifiedNeedingReminder(ctx context.Context, firstReminder, secondReminder, cutoff time.Time) ([]*User, error)
+	// GetEmailsForDeletion is a method for querying user account emails which were requested for deletion by the user and can be deleted.
+	GetEmailsForDeletion(ctx context.Context, statusUpdatedBefore time.Time) ([]string, error)
 	// UpdateVerificationReminders increments verification_reminders.
 	UpdateVerificationReminders(ctx context.Context, id uuid.UUID) error
 	// UpdateFailedLoginCountAndExpiration increments failed_login_count and sets login_lockout_expiration appropriately.
@@ -123,6 +125,7 @@ type CreateUser struct {
 	ActivationCode   string `json:"-"`
 	SignupId         string `json:"-"`
 	AllowNoName      bool   `json:"-"`
+	PaidTier         bool   `json:"-"`
 }
 
 // IsValid checks CreateUser validity and returns error describing whats wrong.
@@ -188,6 +191,8 @@ const (
 	LegalHold UserStatus = 4
 	// PendingBotVerification is a status that user receives after account activation but with high captcha score.
 	PendingBotVerification UserStatus = 5
+	// UserRequestedDeletion is a status that user receives after account owner completed delete account flow.
+	UserRequestedDeletion UserStatus = 6
 )
 
 // String returns a string representation of the user status.
@@ -220,8 +225,9 @@ type User struct {
 	Email        string `json:"email"`
 	PasswordHash []byte `json:"-"`
 
-	Status    UserStatus `json:"status"`
-	UserAgent []byte     `json:"userAgent"`
+	Status          UserStatus `json:"status"`
+	StatusUpdatedAt *time.Time `json:"-"`
+	UserAgent       []byte     `json:"userAgent"`
 
 	CreatedAt time.Time `json:"createdAt"`
 
@@ -239,6 +245,8 @@ type User struct {
 	EmployeeCount  string `json:"employeeCount"`
 
 	HaveSalesContact bool `json:"haveSalesContact"`
+
+	FinalInvoiceGenerated bool `json:"-"`
 
 	MFAEnabled       bool     `json:"mfaEnabled"`
 	MFASecretKey     string   `json:"-"`
@@ -260,6 +268,9 @@ type User struct {
 
 	TrialExpiration *time.Time `json:"trialExpiration"`
 	UpgradeTime     *time.Time `json:"upgradeTime"`
+
+	NewUnverifiedEmail          *string `json:"-"`
+	EmailChangeVerificationStep int     `json:"-"`
 }
 
 // ResponseUser is an entity which describes db User and can be sent in response.
@@ -315,7 +326,8 @@ type UpdateUserRequest struct {
 	Email        *string
 	PasswordHash []byte
 
-	Status *UserStatus
+	Status          *UserStatus
+	StatusUpdatedAt *time.Time
 
 	ProjectLimit          *int
 	ProjectStorageLimit   *int64
@@ -331,6 +343,8 @@ type UpdateUserRequest struct {
 	// to set it to NULL, so it doesn't need to be a double pointer here.
 	FailedLoginCount *int
 
+	FinalInvoiceGenerated *bool
+
 	LoginLockoutExpiration **time.Time
 
 	DefaultPlacement storj.PlacementConstraint
@@ -341,6 +355,9 @@ type UpdateUserRequest struct {
 	TrialExpiration    **time.Time
 	TrialNotifications *TrialNotificationStatus
 	UpgradeTime        *time.Time
+
+	NewUnverifiedEmail          **string
+	EmailChangeVerificationStep *int
 }
 
 // UserSettings contains configurations for a user.
@@ -371,6 +388,7 @@ type NoticeDismissal struct {
 	PartnerUpgradeBanner     bool `json:"partnerUpgradeBanner"`
 	ProjectMembersPassphrase bool `json:"projectMembersPassphrase"`
 	UploadOverwriteWarning   bool `json:"uploadOverwriteWarning"`
+	VersioningBetaBanner     bool `json:"versioningBetaBanner"`
 }
 
 // SetUpAccountRequest holds data for completing account setup.

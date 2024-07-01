@@ -16,7 +16,6 @@ import (
 	"storj.io/common/storj"
 	"storj.io/common/testcontext"
 	"storj.io/common/testrand"
-	"storj.io/common/uuid"
 	"storj.io/storj/satellite/metabase"
 	"storj.io/storj/satellite/metabase/metabasetest"
 )
@@ -73,9 +72,7 @@ func TestNodeAliases(t *testing.T) {
 
 			for _, entry := range aliases {
 				require.True(t, nodesContains(nodes, entry.ID))
-				nonSpannerCheck(db, func() {
-					require.LessOrEqual(t, int(entry.Alias), len(nodes))
-				})
+				require.LessOrEqual(t, int(entry.Alias), len(nodes))
 			}
 
 			metabasetest.EnsureNodeAliases{
@@ -86,6 +83,62 @@ func TestNodeAliases(t *testing.T) {
 
 			aliasesAfter := metabasetest.ListNodeAliases{}.Check(ctx, t, db)
 			require.Len(t, aliasesAfter, 4)
+		})
+
+		t.Run("GetNodeAliasEntries", func(t *testing.T) {
+			defer metabasetest.DeleteAll{}.Check(ctx, t, db)
+
+			nodes := []storj.NodeID{
+				testrand.NodeID(),
+				testrand.NodeID(),
+				testrand.NodeID(),
+			}
+
+			metabasetest.EnsureNodeAliases{
+				Opts: metabase.EnsureNodeAliases{
+					Nodes: nodes,
+				},
+			}.Check(ctx, t, db)
+
+			aliases := metabasetest.ListNodeAliases{}.Check(ctx, t, db)
+			require.Len(t, aliases, 3)
+
+			byid := metabasetest.GetNodeAliasEntries{
+				Opts: metabase.GetNodeAliasEntries{
+					Nodes: []storj.NodeID{aliases[1].ID},
+				},
+			}.Check(ctx, t, db)
+			require.Len(t, byid, 1)
+			require.Equal(t, []metabase.NodeAliasEntry{aliases[1]}, byid)
+
+			byalias := metabasetest.GetNodeAliasEntries{
+				Opts: metabase.GetNodeAliasEntries{
+					Aliases: []metabase.NodeAlias{aliases[2].Alias},
+				},
+			}.Check(ctx, t, db)
+			require.Len(t, byalias, 1)
+			require.Equal(t, []metabase.NodeAliasEntry{aliases[2]}, byalias)
+
+			bymix := metabasetest.GetNodeAliasEntries{
+				Opts: metabase.GetNodeAliasEntries{
+					Nodes:   []storj.NodeID{aliases[0].ID, aliases[1].ID},
+					Aliases: []metabase.NodeAlias{aliases[2].Alias},
+				},
+			}.Check(ctx, t, db)
+			require.Len(t, bymix, 3)
+
+			sort.Slice(aliases, func(i, k int) bool { return aliases[i].Alias < aliases[k].Alias })
+			sort.Slice(bymix, func(i, k int) bool { return bymix[i].Alias < bymix[k].Alias })
+
+			require.Equal(t, aliases, bymix)
+
+			missing := metabasetest.GetNodeAliasEntries{
+				Opts: metabase.GetNodeAliasEntries{
+					Nodes:   []storj.NodeID{{100}},
+					Aliases: []metabase.NodeAlias{10000},
+				},
+			}.Check(ctx, t, db)
+			require.Len(t, missing, 0)
 		})
 
 		t.Run("Concurrent", func(t *testing.T) {
@@ -112,9 +165,7 @@ func TestNodeAliases(t *testing.T) {
 			require.Len(t, aliases, len(nodes))
 			for _, entry := range aliases {
 				require.True(t, nodesContains(nodes, entry.ID))
-				nonSpannerCheck(db, func() {
-					require.LessOrEqual(t, int(entry.Alias), len(nodes))
-				})
+				require.LessOrEqual(t, int(entry.Alias), len(nodes))
 
 				require.False(t, seen[entry.Alias])
 				seen[entry.Alias] = true
@@ -231,14 +282,7 @@ func TestNodeAliases(t *testing.T) {
 			}
 			require.NoError(t, group.Wait())
 		})
-	}, metabasetest.WithSpanner())
-}
-
-func nonSpannerCheck(db *metabase.DB, check func()) {
-	adapter := db.ChooseAdapter(uuid.UUID{})
-	if _, ok := adapter.(*metabase.SpannerAdapter); !ok {
-		check()
-	}
+	})
 }
 
 func nodesContains(nodes []storj.NodeID, v storj.NodeID) bool {

@@ -5,12 +5,10 @@ package metabase
 
 import (
 	"context"
-	"math/rand"
 	"sort"
-	"strings"
-	"time"
 
-	spanner "github.com/storj/exp-spanner"
+	"cloud.google.com/go/spanner"
+	"github.com/jackc/pgtype"
 	"github.com/zeebo/errs"
 	"google.golang.org/grpc/codes"
 
@@ -71,34 +69,32 @@ func (s *SpannerAdapter) EnsureNodeAliases(ctx context.Context, opts EnsureNodeA
 		return err
 	}
 
-	// TODO(spanner) this is not prod ready implementation
-	// TODO(spanner) limited alias value to avoid out of memory
-	maxAliasValue := int64(10000)
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	// TODO(spanner): can this be combined into a single batch query?
+	// TODO(spanner): this is inefficient, but there's a benefit from having densely packed node_aliases
 
-	// TODO(spanner) figure out how to do something like ON CONFLICT DO NOTHING
-	index := 0
-	for index < len(unique) {
-		entry := unique[index]
-		alias := rng.Int63n(maxAliasValue) + 1
-		_, err = s.client.Apply(ctx, []*spanner.Mutation{
-			spanner.Insert("node_aliases", []string{"node_id", "node_alias"}, []interface{}{
-				entry.Bytes(), alias,
-			}),
+	for _, id := range unique {
+		_, err := s.client.ReadWriteTransaction(ctx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
+			_, err := txn.Update(ctx, spanner.Statement{
+				SQL: `INSERT INTO node_aliases (
+					node_id, node_alias
+				) VALUES (
+					@node_id,
+					(SELECT COALESCE(MAX(node_alias)+1, 1) FROM node_aliases)
+				)`,
+				Params: map[string]any{
+					"node_id": id,
+				},
+			})
+			return Error.Wrap(err)
 		})
-		if err != nil {
-			if spanner.ErrCode(err) == codes.AlreadyExists {
-				// TODO(spanner) figure out how to detect UNIQUE violation
-				if strings.Contains(spanner.ErrDesc(err), "UNIQUE violation on index node_aliases_node_alias_key") {
-					// go back and find unique alias
-					continue
-				}
-			} else {
-				return Error.Wrap(err)
-			}
+		if spanner.ErrCode(err) == codes.AlreadyExists {
+			continue
 		}
-		index++
+		if err != nil {
+			return Error.Wrap(err)
+		}
 	}
+
 	return nil
 
 }
@@ -125,6 +121,9 @@ func ensureNodesUniqueness(nodes []storj.NodeID) ([]storj.NodeID, error) {
 func (db *DB) ListNodeAliases(ctx context.Context) (_ []NodeAliasEntry, err error) {
 	defer mon.Task()(&ctx)(&err)
 
+	// TODO(spanner): long term this needs to be a coordinated get across all adapters,
+	// i.e. one of them needs to be the source of truth, otherwise there will be issues
+	// with different db having different NodeAlias for the same node id.
 	return db.ChooseAdapter(uuid.UUID{}).ListNodeAliases(ctx)
 }
 
@@ -171,8 +170,97 @@ func (s *SpannerAdapter) ListNodeAliases(ctx context.Context) (aliases []NodeAli
 		})
 }
 
+// GetNodeAliasEntries contains arguments necessary for fetching node alias entries.
+type GetNodeAliasEntries struct {
+	Nodes   []storj.NodeID
+	Aliases []NodeAlias
+}
+
+// GetNodeAliasEntries fetches node aliases or ID-s for the specified nodes and aliases in random order.
+func (db *DB) GetNodeAliasEntries(ctx context.Context, opts GetNodeAliasEntries) (entries []NodeAliasEntry, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	// TODO(spanner): long term this needs to be a coordinated get across all adapters,
+	// i.e. one of them needs to be the source of truth, otherwise there will be issues
+	// with different db having different NodeAlias for the same node id.
+	return db.ChooseAdapter(uuid.UUID{}).GetNodeAliasEntries(ctx, opts)
+}
+
+// GetNodeAliasEntries implements Adapter.
+func (p *PostgresAdapter) GetNodeAliasEntries(ctx context.Context, opts GetNodeAliasEntries) (_ []NodeAliasEntry, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	var entries []NodeAliasEntry
+	rows, err := p.db.Query(ctx, `
+		SELECT node_id, node_alias
+		FROM node_aliases
+		WHERE node_id = ANY($1) OR node_alias = ANY($2)
+	`, pgutil.NodeIDArray(opts.Nodes), nodeAliasesArray(opts.Aliases))
+	if err != nil {
+		return nil, Error.New("GetNodeAliasEntries query: %w", err)
+	}
+	defer func() { err = errs.Combine(err, rows.Close()) }()
+
+	for rows.Next() {
+		var entry NodeAliasEntry
+		err := rows.Scan(&entry.ID, &entry.Alias)
+		if err != nil {
+			return nil, Error.New("GetNodeAliasEntries scan failed: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, Error.New("GetNodeAliasEntries scan failed: %w", err)
+	}
+
+	return entries, nil
+}
+
+// GetNodeAliasEntries implements Adapter.
+func (s *SpannerAdapter) GetNodeAliasEntries(ctx context.Context, opts GetNodeAliasEntries) (_ []NodeAliasEntry, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	nodeids := [][]byte{}
+	for _, id := range opts.Nodes {
+		nodeids = append(nodeids, id.Bytes())
+	}
+	aliases := []int64{}
+	for _, alias := range opts.Aliases {
+		aliases = append(aliases, int64(alias))
+	}
+
+	return spannerutil.CollectRows(
+		s.client.Single().Query(ctx,
+			spanner.Statement{SQL: `
+					SELECT node_id, node_alias FROM node_aliases
+					WHERE node_id IN unnest(@nodes) OR node_alias IN unnest(@aliases)
+				`,
+				Params: map[string]any{
+					"nodes":   nodeids,
+					"aliases": aliases,
+				}}),
+		func(row *spanner.Row, item *NodeAliasEntry) error {
+			return Error.Wrap(row.Columns(&item.ID, spannerutil.Int(&item.Alias)))
+		})
+}
+
 // LatestNodesAliasMap returns the latest mapping between storj.NodeID and NodeAlias.
 func (db *DB) LatestNodesAliasMap(ctx context.Context) (_ *NodeAliasMap, err error) {
 	defer mon.Task()(&ctx)(&err)
 	return db.aliasCache.Latest(ctx)
+}
+
+// nodeAliasesArray returns an object usable by pg drivers for passing a
+// []NodeAlias slice into a database as type INT4[].
+func nodeAliasesArray(ints []NodeAlias) *pgtype.Int4Array {
+	pgtypeInt4Array := make([]pgtype.Int4, len(ints))
+	for i, someInt := range ints {
+		pgtypeInt4Array[i].Int = int32(someInt)
+		pgtypeInt4Array[i].Status = pgtype.Present
+	}
+	return &pgtype.Int4Array{
+		Elements:   pgtypeInt4Array,
+		Dimensions: []pgtype.ArrayDimension{{Length: int32(len(ints)), LowerBound: 1}},
+		Status:     pgtype.Present,
+	}
 }

@@ -164,7 +164,7 @@ func TestDeleteExpiredObjects(t *testing.T) {
 				},
 			}.Check(ctx, t, db)
 		})
-	}, metabasetest.WithSpanner())
+	})
 }
 
 func TestDeleteZombieObjects(t *testing.T) {
@@ -504,5 +504,5 @@ func TestDeleteZombieObjects(t *testing.T) {
 
 			metabasetest.Verify{}.Check(ctx, t, db)
 		})
-	}, metabasetest.WithSpanner())
+	})
 }

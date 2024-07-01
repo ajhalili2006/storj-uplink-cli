@@ -5,8 +5,9 @@ package metabase
 
 import (
 	"context"
+	"time"
 
-	"github.com/storj/exp-spanner"
+	"cloud.google.com/go/spanner"
 	"go.uber.org/zap"
 
 	"storj.io/common/uuid"
@@ -18,9 +19,11 @@ import (
 // TODO: we may need separated adapter for segments/objects/etc.
 type Adapter interface {
 	Name() string
+	Now(ctx context.Context) (time.Time, error)
+	Ping(ctx context.Context) error
 
 	BeginObjectNextVersion(context.Context, BeginObjectNextVersion, *Object) error
-	GetObjectLastCommitted(ctx context.Context, opts GetObjectLastCommitted, object *Object) error
+	GetObjectLastCommitted(ctx context.Context, opts GetObjectLastCommitted) (Object, error)
 	IterateLoopSegments(ctx context.Context, aliasCache *NodeAliasCache, opts IterateLoopSegments, fn func(context.Context, LoopSegmentsIterator) error) error
 	PendingObjectExists(ctx context.Context, opts BeginSegment) (exists bool, err error)
 	CommitPendingObjectSegment(ctx context.Context, opts CommitSegment, aliasPieces AliasPieces) error
@@ -28,9 +31,12 @@ type Adapter interface {
 	TestingBeginObjectExactVersion(ctx context.Context, opts BeginObjectExactVersion, object *Object) error
 
 	GetTableStats(ctx context.Context, opts GetTableStats) (result TableStats, err error)
+	UpdateTableStats(ctx context.Context) error
 	BucketEmpty(ctx context.Context, opts BucketEmpty) (empty bool, err error)
 
 	WithTx(ctx context.Context, f func(context.Context, TransactionAdapter) error) error
+
+	CollectBucketTallies(ctx context.Context, opts CollectBucketTallies) (result []BucketTally, err error)
 
 	GetSegmentByPosition(ctx context.Context, opts GetSegmentByPosition) (segment Segment, aliasPieces AliasPieces, err error)
 	GetObjectExactVersion(ctx context.Context, opts GetObjectExactVersion) (_ Object, err error)
@@ -40,6 +46,8 @@ type Adapter interface {
 	ListObjects(ctx context.Context, opts ListObjects) (result ListObjectsResult, err error)
 	ListSegments(ctx context.Context, opts ListSegments, aliasCache *NodeAliasCache) (result ListSegmentsResult, err error)
 	ListStreamPositions(ctx context.Context, opts ListStreamPositions) (result ListStreamPositionsResult, err error)
+	ListVerifySegments(ctx context.Context, opts ListVerifySegments) (segments []VerifySegment, err error)
+	ListBucketsStreamIDs(ctx context.Context, opts ListBucketsStreamIDs, bucketNamesBytes [][]byte, projectIDs []uuid.UUID) (result ListBucketsStreamIDsResult, err error)
 
 	UpdateSegmentPieces(ctx context.Context, opts UpdateSegmentPieces, oldPieces, newPieces AliasPieces) (resultPieces AliasPieces, err error)
 	UpdateObjectLastCommittedMetadata(ctx context.Context, opts UpdateObjectLastCommittedMetadata) (affected int64, err error)
@@ -55,9 +63,12 @@ type Adapter interface {
 	DeleteObjectsAndSegments(ctx context.Context, objects []ObjectStream) (objectsDeleted, segmentsDeleted int64, err error)
 	FindZombieObjects(ctx context.Context, opts DeleteZombieObjects, startAfter ObjectStream, batchSize int) (objects []ObjectStream, err error)
 	DeleteInactiveObjectsAndSegments(ctx context.Context, objects []ObjectStream, opts DeleteZombieObjects) (objectsDeleted, segmentsDeleted int64, err error)
+	DeleteBucketObjects(ctx context.Context, opts DeleteBucketObjects) (deletedObjectCount, deletedSegmentCount int64, err error)
 
 	EnsureNodeAliases(ctx context.Context, opts EnsureNodeAliases) error
-	ListNodeAliases(ctx context.Context) (_ []NodeAliasEntry, err error)
+	ListNodeAliases(ctx context.Context) (entries []NodeAliasEntry, err error)
+	GetNodeAliasEntries(ctx context.Context, opts GetNodeAliasEntries) (entries []NodeAliasEntry, err error)
+	GetStreamPieceCountByAlias(ctx context.Context, opts GetStreamPieceCountByNodeID) (result map[NodeAlias]int64, err error)
 
 	doNextQueryAllVersionsWithStatus(ctx context.Context, it *objectsIterator) (_ tagsql.Rows, err error)
 	doNextQueryAllVersionsWithStatusAscending(ctx context.Context, it *objectsIterator) (_ tagsql.Rows, err error)
@@ -80,6 +91,11 @@ type PostgresAdapter struct {
 // Name returns the name of the adapter.
 func (p *PostgresAdapter) Name() string {
 	return "postgres"
+}
+
+// UnderlyingDB returns a handle to the underlying DB.
+func (p *PostgresAdapter) UnderlyingDB() tagsql.DB {
+	return p.db
 }
 
 var _ Adapter = &PostgresAdapter{}

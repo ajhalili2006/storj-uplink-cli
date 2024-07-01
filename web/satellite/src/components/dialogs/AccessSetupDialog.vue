@@ -5,7 +5,6 @@
     <v-dialog
         v-model="model"
         width="auto"
-        min-width="400px"
         max-width="450px"
         transition="fade-transition"
     >
@@ -177,6 +176,9 @@
                             rel="noopener noreferrer"
                             @click="() => sendApplicationsAnalytics(AnalyticsEvent.APPLICATIONS_DOCS_CLICKED)"
                         >
+                            <template #prepend>
+                                <IconDocs />
+                            </template>
                             Read Docs
                         </v-btn>
                     </v-col>
@@ -238,6 +240,7 @@ import PassphraseGeneratedStep from '@/components/dialogs/commonPassphraseSteps/
 import OptionalExpirationStep from '@/components/dialogs/accessSetupSteps/OptionalExpirationStep.vue';
 import EncryptionInfoStep from '@/components/dialogs/createAccessSteps/EncryptionInfoStep.vue';
 import ConfirmDetailsStep from '@/components/dialogs/accessSetupSteps/ConfirmDetailsStep.vue';
+import IconDocs from '@/components/icons/IconDocs.vue';
 
 type SetupLocation = SetupStep | undefined | (() => (SetupStep | undefined));
 
@@ -312,12 +315,14 @@ const credentials = resettableRef<EdgeCredentials>(new EdgeCredentials());
 
 const promptForPassphrase = computed<boolean>(() => bucketsStore.state.promptForPassphrase);
 
+const hasManagedPassphrase = computed<boolean>(() => !!projectsStore.state.selectedProjectConfig.passphrase);
+
 const stepInfos: Record<SetupStep, StepInfo> = {
     [SetupStep.ChooseAccessStep]: new StepInfo(
         'Next ->',
         'Cancel',
         undefined,
-        () => (accessType.value === AccessType.S3 && !userStore.noticeDismissal.serverSideEncryption)
+        () => (accessType.value === AccessType.S3 && !userStore.noticeDismissal.serverSideEncryption && !hasManagedPassphrase.value)
             ? SetupStep.EncryptionInfo
             : SetupStep.ChooseFlowStep,
     ),
@@ -339,7 +344,7 @@ const stepInfos: Record<SetupStep, StepInfo> = {
         () => {
             if (props.defaultAccessType) return undefined;
 
-            return accessType.value === AccessType.S3 && !userStore.noticeDismissal.serverSideEncryption
+            return accessType.value === AccessType.S3 && !userStore.noticeDismissal.serverSideEncryption  && !hasManagedPassphrase.value
                 ? SetupStep.EncryptionInfo
                 : SetupStep.ChooseAccessStep;
         },

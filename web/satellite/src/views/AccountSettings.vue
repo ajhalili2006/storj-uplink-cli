@@ -12,7 +12,7 @@
         </v-row>
 
         <v-row>
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Name">
                     <v-card-text>
                         <v-chip color="default" variant="tonal" size="small" class="font-weight-bold">
@@ -25,14 +25,24 @@
                     </v-card-text>
                 </v-card>
             </v-col>
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Email Address">
                     <v-card-text>
                         <v-chip color="default" variant="tonal" size="small" rounded="md" class="font-weight-bold">
                             {{ user.email }}
                         </v-chip>
                         <v-divider class="my-4" />
-                        <div>
+                        <v-btn
+                            v-if="changeEmailEnabled"
+                            variant="outlined"
+                            color="default"
+                            size="small"
+                            rounded="md"
+                            @click="isChangeEmailDialogShown = true"
+                        >
+                            Change Email
+                        </v-btn>
+                        <div v-else>
                             <v-tooltip
                                 activator="parent"
                                 location="top"
@@ -46,7 +56,7 @@
                     </v-card-text>
                 </v-card>
             </v-col>
-            <v-col v-if="billingEnabled" cols="12" lg="4">
+            <v-col v-if="billingEnabled" cols="12" sm="6" lg="4">
                 <v-card title="Account Type">
                     <v-card-text>
                         <v-chip
@@ -76,7 +86,7 @@
         </v-row>
 
         <v-row>
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Password" variant="outlined">
                     <v-card-subtitle>
                         **********
@@ -90,7 +100,7 @@
                 </v-card>
             </v-col>
 
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Two-factor authentication">
                     <v-card-subtitle>
                         Improve security by enabling 2FA.
@@ -106,7 +116,7 @@
                 </v-card>
             </v-col>
 
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Session Timeout">
                     <v-card-subtitle>
                         Log out after {{ userSettings.sessionDuration?.shortString ?? Duration.MINUTES_15.shortString }}.
@@ -120,7 +130,7 @@
                 </v-card>
             </v-col>
 
-            <v-col cols="12" lg="4">
+            <v-col cols="12" sm="6" lg="4">
                 <v-card title="Passphrase Preference">
                     <v-card-subtitle>
                         {{ userSettings.passphrasePrompt ? 'Ask for passphrase when opening a project.' : 'Only ask for passphrase when necessary.' }}
@@ -134,7 +144,41 @@
                 </v-card>
             </v-col>
         </v-row>
+
+        <template v-if="deleteAccountEnabled">
+            <v-row>
+                <v-col>
+                    <h3 class="mt-5">Danger</h3>
+                </v-col>
+            </v-row>
+
+            <v-row>
+                <v-col cols="12" sm="6" lg="4">
+                    <v-card title="Delete Account">
+                        <v-card-subtitle>
+                            Delete all of your own projects and data.
+                        </v-card-subtitle>
+                        <v-card-text>
+                            <v-divider class="mb-4" />
+                            <v-btn variant="outlined" color="error" size="small" @click="isAccountDeleteDialogShown = true">
+                                Delete
+                            </v-btn>
+                        </v-card-text>
+                    </v-card>
+                </v-col>
+            </v-row>
+        </template>
     </v-container>
+
+    <AccountEmailChangeDialog
+        v-if="changeEmailEnabled"
+        v-model="isChangeEmailDialogShown"
+    />
+
+    <AccountDeleteDialog
+        v-if="deleteAccountEnabled"
+        v-model="isAccountDeleteDialogShown"
+    />
 
     <ChangePasswordDialog
         v-model="isChangePasswordDialogShown"
@@ -200,6 +244,8 @@ import MFACodesDialog from '@/components/dialogs/MFACodesDialog.vue';
 import SetSessionTimeoutDialog from '@/components/dialogs/SetSessionTimeoutDialog.vue';
 import TrialExpirationBanner from '@/components/TrialExpirationBanner.vue';
 import SetPassphrasePromptDialog from '@/components/dialogs/SetPassphrasePromptDialog.vue';
+import AccountEmailChangeDialog from '@/components/dialogs/AccountEmailChangeDialog.vue';
+import AccountDeleteDialog from '@/components/dialogs/AccountDeleteDialog.vue';
 
 const appStore = useAppStore();
 const configStore = useConfigStore();
@@ -215,6 +261,8 @@ const isDisableMFADialogShown = ref<boolean>(false);
 const isRecoveryCodesDialogShown = ref<boolean>(false);
 const isSetSessionTimeoutDialogShown = ref<boolean>(false);
 const isSetPassphrasePromptDialogShown = ref<boolean>(false);
+const isChangeEmailDialogShown = ref<boolean>(false);
+const isAccountDeleteDialogShown = ref<boolean>(false);
 
 /**
  * Returns user entity from store.
@@ -227,6 +275,16 @@ const user = computed((): User => {
  * Whether billing features should be enabled
  */
 const billingEnabled = computed<boolean>(() => configStore.getBillingEnabled(user.value.hasVarPartner));
+
+/**
+ * Whether change email feature should be enabled
+ */
+const changeEmailEnabled = computed<boolean>(() => configStore.state.config.emailChangeFlowEnabled);
+
+/**
+ * Whether delete account feature should be enabled
+ */
+const deleteAccountEnabled = computed<boolean>(() => configStore.state.config.selfServeAccountDeleteEnabled);
 
 /**
  * Returns user settings from store.

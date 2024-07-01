@@ -25,30 +25,30 @@ type ConsoleDB struct {
 	db *satelliteDB
 	tx *dbx.Tx
 
-	methods dbx.Methods
+	methods dbx.DriverMethods
 
-	apikeysOnce *sync.Once
-	apikeys     *apikeys
+	apikeysOnce  *sync.Once
+	apikeysCache *lrucache.ExpiringLRUOf[*projectApiKeyRow]
 }
 
 // Users is getter a for Users repository.
 func (db *ConsoleDB) Users() console.Users {
-	return &users{db.db}
+	return &users{db: db.methods}
 }
 
 // Projects is a getter for Projects repository.
 func (db *ConsoleDB) Projects() console.Projects {
-	return &projects{db: db.methods, sdb: db.db}
+	return &projects{db: db.methods}
 }
 
 // ProjectMembers is a getter for ProjectMembers repository.
 func (db *ConsoleDB) ProjectMembers() console.ProjectMembers {
-	return &projectMembers{db.methods, db.db}
+	return &projectMembers{db: db.methods}
 }
 
 // ProjectInvitations is a getter for ProjectInvitations repository.
 func (db *ConsoleDB) ProjectInvitations() console.ProjectInvitations {
-	return &projectInvitations{db.methods}
+	return &projectInvitations{db: db.methods}
 }
 
 // APIKeys is a getter for APIKeys repository.
@@ -56,34 +56,33 @@ func (db *ConsoleDB) APIKeys() console.APIKeys {
 	db.apikeysOnce.Do(func() {
 		options := db.apikeysLRUOptions
 		options.Name = "satellitedb-apikeys"
-		db.apikeys = &apikeys{
-			methods: db.methods,
-			lru:     lrucache.NewOf[*dbx.ApiKey_Project_PublicId_Project_RateLimit_Project_BurstLimit_Project_SegmentLimit_Project_UsageLimit_Project_BandwidthLimit_Project_UserSpecifiedUsageLimit_Project_UserSpecifiedBandwidthLimit_Row](options),
-			db:      db.db,
-		}
+		db.apikeysCache = lrucache.NewOf[*projectApiKeyRow](options)
 	})
 
-	return db.apikeys
+	return &apikeys{
+		db:  db.methods,
+		lru: db.apikeysCache,
+	}
 }
 
 // RegistrationTokens is a getter for RegistrationTokens repository.
 func (db *ConsoleDB) RegistrationTokens() console.RegistrationTokens {
-	return &registrationTokens{db.methods}
+	return &registrationTokens{db: db.methods}
 }
 
 // ResetPasswordTokens is a getter for ResetPasswordTokens repository.
 func (db *ConsoleDB) ResetPasswordTokens() console.ResetPasswordTokens {
-	return &resetPasswordTokens{db.methods}
+	return &resetPasswordTokens{db: db.methods}
 }
 
 // WebappSessions is a getter for WebappSessions repository.
 func (db *ConsoleDB) WebappSessions() consoleauth.WebappSessions {
-	return &webappSessions{db.db}
+	return &webappSessions{db: db.methods}
 }
 
 // AccountFreezeEvents is a getter for AccountFreezeEvents repository.
 func (db *ConsoleDB) AccountFreezeEvents() console.AccountFreezeEvents {
-	return &accountFreezeEvents{db.db}
+	return &accountFreezeEvents{db: db.methods}
 }
 
 // WithTx is a method for executing and retrying transaction.
@@ -102,8 +101,8 @@ func (db *ConsoleDB) WithTx(ctx context.Context, fn func(context.Context, consol
 				tx:      tx,
 				methods: tx,
 
-				apikeysOnce: db.apikeysOnce,
-				apikeys:     db.apikeys,
+				apikeysOnce:  db.apikeysOnce,
+				apikeysCache: db.apikeysCache,
 			},
 		}
 		return fn(ctx, dbTx)

@@ -10,22 +10,15 @@ import (
 	"errors"
 	"sort"
 
-	spanner "github.com/storj/exp-spanner"
+	"cloud.google.com/go/spanner"
 	"github.com/zeebo/errs"
 	"google.golang.org/api/iterator"
 
-	"storj.io/common/storj"
 	"storj.io/common/uuid"
 	"storj.io/storj/shared/dbutil/pgutil"
 	"storj.io/storj/shared/dbutil/spannerutil"
 	"storj.io/storj/shared/tagsql"
 )
-
-// DeletedSegmentInfo info about deleted segment.
-type DeletedSegmentInfo struct {
-	RootPieceID storj.PieceID
-	Pieces      Pieces
-}
 
 // DeleteObjectExactVersion contains arguments necessary for deleting an exact version of object.
 type DeleteObjectExactVersion struct {
@@ -143,26 +136,19 @@ func (s *SpannerAdapter) DeleteObjectExactVersion(ctx context.Context, opts Dele
 	defer mon.Task()(&ctx)(&err)
 
 	_, err = s.client.ReadWriteTransaction(ctx, func(ctx context.Context, tx *spanner.ReadWriteTransaction) error {
-		objectDeletion := spanner.Statement{
-			SQL: `
-				DELETE FROM objects
-				WHERE (project_id, bucket_name, object_key, version) = (@project_id, @bucket_name, @object_key, @version)
-				THEN RETURN
-					version, stream_id, created_at, expires_at, status, segment_count, encrypted_metadata_nonce,
-					encrypted_metadata, encrypted_metadata_encrypted_key, total_plain_size, total_encrypted_size,
-					fixed_segment_size, encryption
-			`,
-			Params: map[string]interface{}{
-				"project_id":  opts.ProjectID,
-				"bucket_name": opts.BucketName,
-				"object_key":  opts.ObjectKey,
-				"version":     opts.Version,
-			},
-		}
-		objectsDeleted := tx.Query(ctx, objectDeletion)
-		defer objectsDeleted.Stop()
-
-		result.Removed, err = scanObjectDeletionSpanner(ctx, opts.ObjectLocation, objectsDeleted)
+		result.Removed, err = collectDeletedObjectsSpanner(ctx, opts.ObjectLocation,
+			tx.Query(ctx, spanner.Statement{
+				SQL: `
+					DELETE FROM objects
+					WHERE (project_id, bucket_name, object_key, version) = (@project_id, @bucket_name, @object_key, @version)
+					THEN RETURN` + collectDeletedObjectsSpannerFields,
+				Params: map[string]interface{}{
+					"project_id":  opts.ProjectID,
+					"bucket_name": opts.BucketName,
+					"object_key":  opts.ObjectKey,
+					"version":     opts.Version,
+				},
+			}))
 		if err != nil {
 			return Error.Wrap(err)
 		}
@@ -256,17 +242,13 @@ func (p *PostgresAdapter) DeletePendingObject(ctx context.Context, opts DeletePe
 // DeletePendingObject deletes a pending object with specified version and streamID.
 func (s *SpannerAdapter) DeletePendingObject(ctx context.Context, opts DeletePendingObject) (result DeleteObjectResult, err error) {
 	_, err = s.client.ReadWriteTransaction(ctx, func(ctx context.Context, tx *spanner.ReadWriteTransaction) error {
-		objectDeletion := spanner.Statement{
+		result.Removed, err = collectDeletedObjectsSpanner(ctx, opts.Location(), tx.Query(ctx, spanner.Statement{
 			SQL: `
 				DELETE FROM objects
 				WHERE
 					(project_id, bucket_name, object_key, version, stream_id) = (@project_id, @bucket_name, @object_key, @version, @stream_id) AND
 					status = ` + statusPending + `
-				THEN RETURN
-					version, stream_id, created_at, expires_at, status, segment_count,
-					encrypted_metadata_nonce, encrypted_metadata, encrypted_metadata_encrypted_key,
-					total_plain_size, total_encrypted_size, fixed_segment_size, encryption
-			`,
+				THEN RETURN` + collectDeletedObjectsSpannerFields,
 			Params: map[string]interface{}{
 				"project_id":  opts.ProjectID,
 				"bucket_name": opts.BucketName,
@@ -274,14 +256,7 @@ func (s *SpannerAdapter) DeletePendingObject(ctx context.Context, opts DeletePen
 				"version":     opts.Version,
 				"stream_id":   opts.StreamID,
 			},
-		}
-		objectsDeleted := tx.Query(ctx, objectDeletion)
-		defer objectsDeleted.Stop()
-
-		result.Removed, err = scanObjectDeletionSpanner(ctx, opts.Location(), objectsDeleted)
-		if err != nil {
-			return Error.Wrap(err)
-		}
+		}))
 
 		// TODO(spanner): check whether this can be optimized.
 		streamIDs := make([][]byte, 0, len(result.Removed))
@@ -383,7 +358,7 @@ func (p *PostgresAdapter) DeleteObjectsAllVersions(ctx context.Context, projectI
 // DeleteObjectsAllVersions deletes all versions of multiple objects from the same bucket.
 func (s *SpannerAdapter) DeleteObjectsAllVersions(ctx context.Context, projectID uuid.UUID, bucketName string, objectKeys [][]byte) (result DeleteObjectResult, err error) {
 	_, err = s.client.ReadWriteTransaction(ctx, func(ctx context.Context, tx *spanner.ReadWriteTransaction) error {
-		objectDeletion := spanner.Statement{
+		result.Removed, err = spannerutil.CollectRows(tx.Query(ctx, spanner.Statement{
 			SQL: `
 				DELETE FROM objects
 				WHERE
@@ -401,11 +376,20 @@ func (s *SpannerAdapter) DeleteObjectsAllVersions(ctx context.Context, projectID
 				"bucket_name": bucketName,
 				"keys":        objectKeys,
 			},
-		}
-		objectsDeleted := tx.Query(ctx, objectDeletion)
-		defer objectsDeleted.Stop()
+		}), func(row *spanner.Row, object *Object) error {
+			err := row.Columns(&object.ProjectID, &object.BucketName,
+				&object.ObjectKey, &object.Version, &object.StreamID,
+				&object.CreatedAt, &object.ExpiresAt,
+				&object.Status, spannerutil.Int(&object.SegmentCount),
+				&object.EncryptedMetadataNonce, &object.EncryptedMetadata, &object.EncryptedMetadataEncryptedKey,
+				&object.TotalPlainSize, &object.TotalEncryptedSize, spannerutil.Int(&object.FixedSegmentSize),
+				encryptionParameters{&object.Encryption})
+			if err != nil {
+				return Error.New("unable to scan deleted object: %w", err)
+			}
+			return nil
+		})
 
-		result.Removed, err = scanMultipleObjectsDeletionSpanner(ctx, objectsDeleted)
 		if err != nil {
 			return Error.Wrap(err)
 		}
@@ -458,37 +442,38 @@ func scanObjectDeletionPostgres(ctx context.Context, location ObjectLocation, ro
 	return objects, nil
 }
 
-// scanObjectDeletionSpanner reads in the results of an object deletion from the database.
-func scanObjectDeletionSpanner(ctx context.Context, location ObjectLocation, resultIter *spanner.RowIterator) (objects []Object, err error) {
+const collectDeletedObjectsSpannerFields = " " +
+	`version, stream_id, created_at, expires_at, status, segment_count, encrypted_metadata_nonce,
+	encrypted_metadata, encrypted_metadata_encrypted_key, total_plain_size, total_encrypted_size,
+	fixed_segment_size, encryption`
+
+// collectDeletedObjectsSpanner reads in the results of an object deletion from the database.
+func collectDeletedObjectsSpanner(ctx context.Context, location ObjectLocation, iter *spanner.RowIterator) (objects []Object, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	objects = make([]Object, 0, 10)
-
-	var object Object
-	for {
-		row, err := resultIter.Next()
-		if err != nil {
-			if errors.Is(err, iterator.Done) {
-				break
+	objects, err = spannerutil.CollectRows(iter,
+		func(row *spanner.Row, object *Object) error {
+			err := row.Columns(&object.Version, &object.StreamID,
+				&object.CreatedAt, &object.ExpiresAt,
+				&object.Status, spannerutil.Int(&object.SegmentCount),
+				&object.EncryptedMetadataNonce, &object.EncryptedMetadata, &object.EncryptedMetadataEncryptedKey,
+				&object.TotalPlainSize, &object.TotalEncryptedSize, spannerutil.Int(&object.FixedSegmentSize),
+				encryptionParameters{&object.Encryption},
+			)
+			if err != nil {
+				return Error.New("unable to delete object: %w", err)
 			}
-			return nil, Error.New("unable to delete object: %w", err)
-		}
+			return nil
+		})
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	for i := range objects {
+		object := &objects[i]
 		object.ProjectID = location.ProjectID
 		object.BucketName = location.BucketName
 		object.ObjectKey = location.ObjectKey
-
-		err = row.Columns(&object.Version, &object.StreamID,
-			&object.CreatedAt, &object.ExpiresAt,
-			&object.Status, spannerutil.Int(&object.SegmentCount),
-			&object.EncryptedMetadataNonce, &object.EncryptedMetadata, &object.EncryptedMetadataEncryptedKey,
-			&object.TotalPlainSize, &object.TotalEncryptedSize, spannerutil.Int(&object.FixedSegmentSize),
-			encryptionParameters{&object.Encryption},
-		)
-		if err != nil {
-			return nil, Error.New("unable to read object deletion result: %w", err)
-		}
-
-		objects = append(objects, object)
 	}
 
 	return objects, nil
@@ -508,41 +493,6 @@ func scanMultipleObjectsDeletionPostgres(ctx context.Context, rows tagsql.Rows) 
 			&object.Status, &object.SegmentCount,
 			&object.EncryptedMetadataNonce, &object.EncryptedMetadata, &object.EncryptedMetadataEncryptedKey,
 			&object.TotalPlainSize, &object.TotalEncryptedSize, &object.FixedSegmentSize,
-			encryptionParameters{&object.Encryption})
-		if err != nil {
-			return nil, Error.New("unable to delete object: %w", err)
-		}
-
-		objects = append(objects, object)
-	}
-
-	if len(objects) == 0 {
-		objects = nil
-	}
-
-	return objects, nil
-}
-
-func scanMultipleObjectsDeletionSpanner(ctx context.Context, rowIterator *spanner.RowIterator) (objects []Object, err error) {
-	defer mon.Task()(&ctx)(&err)
-
-	objects = make([]Object, 0, 10)
-
-	var object Object
-	for {
-		row, err := rowIterator.Next()
-		if err != nil {
-			if errors.Is(err, iterator.Done) {
-				break
-			}
-			return nil, Error.New("unable to delete object: %w", err)
-		}
-		err = row.Columns(&object.ProjectID, &object.BucketName,
-			&object.ObjectKey, &object.Version, &object.StreamID,
-			&object.CreatedAt, &object.ExpiresAt,
-			&object.Status, spannerutil.Int(&object.SegmentCount),
-			&object.EncryptedMetadataNonce, &object.EncryptedMetadata, &object.EncryptedMetadataEncryptedKey,
-			&object.TotalPlainSize, &object.TotalEncryptedSize, spannerutil.Int(&object.FixedSegmentSize),
 			encryptionParameters{&object.Encryption})
 		if err != nil {
 			return nil, Error.New("unable to delete object: %w", err)
@@ -660,31 +610,21 @@ func (s *SpannerAdapter) DeleteObjectLastCommittedPlain(ctx context.Context, opt
 	// TODO(ver): should this report an error when the object doesn't exist?
 	_, err = s.client.ReadWriteTransaction(ctx, func(ctx context.Context, tx *spanner.ReadWriteTransaction) error {
 		// TODO(spanner): is there a better way to combine these deletes from different tables?
-		objectDeletion := spanner.Statement{
-			SQL: `
-				DELETE FROM objects
-				WHERE
-					(project_id, bucket_name, object_key) = (@project_id, @bucket_name, @object_key) AND
-					status = ` + statusCommittedUnversioned + ` AND
-					(expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-				THEN RETURN
-					version, stream_id,
-					created_at, expires_at,
-					status, segment_count,
-					encrypted_metadata_nonce, encrypted_metadata, encrypted_metadata_encrypted_key,
-					total_plain_size, total_encrypted_size, fixed_segment_size,
-					encryption
-			`,
-			Params: map[string]interface{}{
-				"project_id":  opts.ProjectID,
-				"bucket_name": opts.BucketName,
-				"object_key":  opts.ObjectKey,
-			},
-		}
-		objectsDeleted := tx.Query(ctx, objectDeletion)
-		defer objectsDeleted.Stop()
-
-		result.Removed, err = scanObjectDeletionSpanner(ctx, opts.ObjectLocation, objectsDeleted)
+		result.Removed, err = collectDeletedObjectsSpanner(ctx, opts.ObjectLocation,
+			tx.Query(ctx, spanner.Statement{
+				SQL: `
+					DELETE FROM objects
+						WHERE
+							(project_id, bucket_name, object_key) = (@project_id, @bucket_name, @object_key) AND
+							status = ` + statusCommittedUnversioned + ` AND
+							(expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+						THEN RETURN` + collectDeletedObjectsSpannerFields,
+				Params: map[string]interface{}{
+					"project_id":  opts.ProjectID,
+					"bucket_name": opts.BucketName,
+					"object_key":  opts.ObjectKey,
+				},
+			}))
 		if err != nil {
 			return Error.Wrap(err)
 		}
@@ -779,49 +719,44 @@ func (s *SpannerAdapter) DeleteObjectLastCommittedSuspended(ctx context.Context,
 			return ErrObjectNotFound.New("unable to delete object")
 		}
 
-		resultIterator := stx.tx.Query(ctx, spanner.Statement{
-			SQL: `
-				INSERT INTO objects (
-					project_id, bucket_name, object_key, version, stream_id,
-					status,
-					zombie_deletion_deadline
-				) VALUES (
-					@project_id, @bucket_name, @object_key, @version, @marker,
-					` + statusDeleteMarkerUnversioned + `,
-					NULL
-				)
-				THEN RETURN
-					version,
-					created_at
-			`,
-			Params: map[string]interface{}{
-				"project_id":  opts.ProjectID,
-				"bucket_name": opts.BucketName,
-				"object_key":  opts.ObjectKey,
-				"version":     precommit.HighestVersion + 1,
-				"marker":      deleterMarkerStreamID,
-			},
-		})
-		defer resultIterator.Stop()
-
-		row, err := resultIterator.Next()
+		marker, err := spannerutil.CollectRow(
+			stx.tx.Query(ctx, spanner.Statement{
+				SQL: `
+					INSERT INTO objects (
+						project_id, bucket_name, object_key, version, stream_id,
+						status,
+						zombie_deletion_deadline
+					) VALUES (
+						@project_id, @bucket_name, @object_key, @version, @marker,
+						` + statusDeleteMarkerUnversioned + `,
+						NULL
+					)
+					THEN RETURN
+						version,
+						created_at
+				`,
+				Params: map[string]interface{}{
+					"project_id":  opts.ProjectID,
+					"bucket_name": opts.BucketName,
+					"object_key":  opts.ObjectKey,
+					"version":     precommit.HighestVersion + 1,
+					"marker":      deleterMarkerStreamID,
+				},
+			}), func(row *spanner.Row, item *Object) error {
+				return Error.Wrap(row.Columns(&item.Version, &item.CreatedAt))
+			})
 		if err != nil {
 			if errors.Is(err, iterator.Done) {
 				return Error.New("could not insert deletion marker: %w", err)
 			}
 			return Error.Wrap(err)
 		}
-		var marker Object
+
 		marker.ProjectID = opts.ProjectID
 		marker.BucketName = opts.BucketName
 		marker.ObjectKey = opts.ObjectKey
 		marker.Status = DeleteMarkerUnversioned
 		marker.StreamID = deleterMarkerStreamID
-
-		err = row.Columns(&marker.Version, &marker.CreatedAt)
-		if err != nil {
-			return Error.Wrap(err)
-		}
 
 		result.Markers = append(result.Markers, marker)
 		result.Removed = precommit.Deleted
@@ -878,37 +813,38 @@ func (p *PostgresAdapter) DeleteObjectLastCommittedVersioned(ctx context.Context
 // DeleteObjectLastCommittedVersioned deletes an object last committed version when opts.Versioned is true.
 func (s *SpannerAdapter) DeleteObjectLastCommittedVersioned(ctx context.Context, opts DeleteObjectLastCommitted, deleterMarkerStreamID uuid.UUID) (result DeleteObjectResult, err error) {
 	_, err = s.client.ReadWriteTransaction(ctx, func(ctx context.Context, tx *spanner.ReadWriteTransaction) error {
-		rowIterator := tx.Query(ctx, spanner.Statement{
-			SQL: `
-				INSERT INTO objects (
-					project_id, bucket_name, object_key, version, stream_id,
-					status,
-					zombie_deletion_deadline
-				)
-				SELECT
-					@project_id, @bucket_name, @object_key,
-						coalesce((
-							SELECT version + 1
-							FROM objects
-							WHERE (project_id, bucket_name, object_key) = (@project_id, @bucket_name, @object_key)
-							ORDER BY version DESC
-							LIMIT 1
-						), 1),
-					@marker,
-					` + statusDeleteMarkerVersioned + `,
-					NULL
-				THEN RETURN version, created_at
-			`,
-			Params: map[string]interface{}{
-				"project_id":  opts.ProjectID,
-				"bucket_name": opts.BucketName,
-				"object_key":  opts.ObjectKey,
-				"marker":      deleterMarkerStreamID,
-			},
-		})
-		defer rowIterator.Stop()
 
-		row, err := rowIterator.Next()
+		deleted, err := spannerutil.CollectRow(
+			tx.Query(ctx, spanner.Statement{
+				SQL: `
+					INSERT INTO objects (
+						project_id, bucket_name, object_key, version, stream_id,
+						status,
+						zombie_deletion_deadline
+					)
+					SELECT
+						@project_id, @bucket_name, @object_key,
+							coalesce((
+								SELECT version + 1
+								FROM objects
+								WHERE (project_id, bucket_name, object_key) = (@project_id, @bucket_name, @object_key)
+								ORDER BY version DESC
+								LIMIT 1
+							), 1),
+						@marker,
+						` + statusDeleteMarkerVersioned + `,
+						NULL
+					THEN RETURN version, created_at
+				`,
+				Params: map[string]interface{}{
+					"project_id":  opts.ProjectID,
+					"bucket_name": opts.BucketName,
+					"object_key":  opts.ObjectKey,
+					"marker":      deleterMarkerStreamID,
+				},
+			}), func(row *spanner.Row, item *Object) error {
+				return Error.Wrap(row.Columns(&item.Version, &item.CreatedAt))
+			})
 		if err != nil {
 			if errors.Is(err, iterator.Done) {
 				return ErrObjectNotFound.Wrap(Error.New("object does not exist"))
@@ -916,18 +852,14 @@ func (s *SpannerAdapter) DeleteObjectLastCommittedVersioned(ctx context.Context,
 			return Error.Wrap(err)
 		}
 
-		var deleted Object
 		deleted.ProjectID = opts.ProjectID
 		deleted.BucketName = opts.BucketName
 		deleted.ObjectKey = opts.ObjectKey
 		deleted.StreamID = deleterMarkerStreamID
 		deleted.Status = DeleteMarkerVersioned
 
-		err = row.Columns(&deleted.Version, &deleted.CreatedAt)
-		if err != nil {
-			return Error.Wrap(err)
-		}
 		result.Markers = []Object{deleted}
+
 		return nil
 	})
 	if err != nil {

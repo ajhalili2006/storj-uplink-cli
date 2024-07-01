@@ -63,12 +63,12 @@
                     </td>
                     <td>
                         <p class="text-caption">
-                            {{ getFormattedSize(file) }}
+                            {{ getFileInfo(file).typeInfo.title }}
                         </p>
                     </td>
                     <td>
                         <p class="text-caption">
-                            {{ getFileInfo(file).typeInfo.title }}
+                            {{ getFormattedSize(file) }}
                         </p>
                     </td>
                     <td>
@@ -155,6 +155,7 @@
             v-model="previewDialog"
             v-model:current-file="fileToPreview"
             :showing-versions="!!fileToPreview?.VersionId"
+            @file-deleted="onFilesDeleted"
         />
     </v-card>
 
@@ -173,7 +174,7 @@
             <v-col>
                 <div class="d-flex justify-end">
                     <v-btn
-                        color="default"
+                        color="error"
                         density="comfortable"
                         variant="outlined"
                         @click="isDeleteFileDialogShown = true"
@@ -191,7 +192,7 @@
     <delete-file-dialog
         v-model="isDeleteFileDialogShown"
         :files="filesToDelete"
-        @files-deleted="clearDeleteFiles"
+        @files-deleted="onFilesDeleted"
         @content-removed="fileToDelete = null"
     />
     <share-dialog
@@ -447,7 +448,8 @@ const firstFile = computed<BrowserObject | null>(() => {
     return tableFiles.value.find(f => f.browserObject.type === 'file')?.browserObject || null;
 });
 
-function clearDeleteFiles(): void {
+function onFilesDeleted(): void {
+    fetchFiles();
     fileToDelete.value = null;
     obStore.updateSelectedFiles([]);
 }

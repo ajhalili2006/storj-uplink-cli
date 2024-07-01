@@ -27,8 +27,7 @@ var ek = eventkit.Package()
 
 // implementation of Projects interface repository using spacemonkeygo/dbx orm.
 type projects struct {
-	db  dbx.Methods
-	sdb *satelliteDB
+	db dbx.DriverMethods
 }
 
 // GetAll is a method for querying all projects from the database.
@@ -71,7 +70,7 @@ func (projects *projects) GetCreatedBefore(ctx context.Context, before time.Time
 func (projects *projects) GetByUserID(ctx context.Context, userID uuid.UUID) (_ []console.Project, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	rows, err := projects.sdb.Query(ctx, projects.sdb.Rebind(`
+	rows, err := projects.db.QueryContext(ctx, projects.db.Rebind(`
 		SELECT
 			projects.id,
 			projects.public_id,
@@ -160,15 +159,18 @@ func (projects *projects) GetSalt(ctx context.Context, id uuid.UUID) (salt []byt
 
 // GetEncryptedPassphrase gets the encrypted passphrase of this project.
 // NB: projects that don't have satellite managed encryption will not have this.
-func (projects *projects) GetEncryptedPassphrase(ctx context.Context, id uuid.UUID) (_ []byte, err error) {
+func (projects *projects) GetEncryptedPassphrase(ctx context.Context, id uuid.UUID) (encPassphrase []byte, keyID *int, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	res, err := projects.db.Get_Project_PassphraseEnc_By_Id(ctx, dbx.Project_Id(id[:]))
-	if err != nil {
-		return nil, err
-	}
+	// TODO: add method to DBX after DB freeze is over.
 
-	return res.PassphraseEnc, nil
+	err = projects.db.QueryRowContext(ctx, `
+		SELECT passphrase_enc, passphrase_enc_key_id
+		FROM projects
+		WHERE id = $1 
+	`, id).Scan(&encPassphrase, &keyID)
+
+	return encPassphrase, keyID, err
 }
 
 // GetByPublicID is a method for querying project from the database by public_id.
@@ -219,6 +221,9 @@ func (projects *projects) Insert(ctx context.Context, project *console.Project) 
 	}
 	if project.PassphraseEnc != nil {
 		createFields.PassphraseEnc = dbx.Project_PassphraseEnc(project.PassphraseEnc)
+	}
+	if project.PassphraseEncKeyID != nil {
+		createFields.PassphraseEncKeyId = dbx.Project_PassphraseEncKeyId(*project.PassphraseEncKeyID)
 	}
 	if project.PathEncryption != nil {
 		createFields.PathEncryption = dbx.Project_PathEncryption(*project.PathEncryption)
@@ -405,6 +410,76 @@ func (projects *projects) UpdateAllLimits(
 	return err
 }
 
+// UpdateLimitsGeneric is a method for updating any or all types of limits on a project.
+// ALL limits passed in to the request will be updated i.e. if a limit type is passed in with a null value, that limit will be updated to null.
+func (projects *projects) UpdateLimitsGeneric(ctx context.Context, id uuid.UUID, toUpdate []console.Limit) (err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	if len(toUpdate) == 0 {
+		return nil
+	}
+
+	updateFields := dbx.Project_Update_Fields{}
+
+	for _, limit := range toUpdate {
+		val64 := limit.Value
+		var val32 *int
+		if val64 != nil {
+			newVal := int(*val64)
+			val32 = &newVal
+		}
+
+		switch limit.Kind {
+		case console.StorageLimit:
+			updateFields.UsageLimit = dbx.Project_UsageLimit_Raw(val64)
+		case console.BandwidthLimit:
+			updateFields.BandwidthLimit = dbx.Project_BandwidthLimit_Raw(val64)
+		case console.UserSetStorageLimit:
+			updateFields.UserSpecifiedUsageLimit = dbx.Project_UserSpecifiedUsageLimit_Raw(val64)
+		case console.UserSetBandwidthLimit:
+			updateFields.UserSpecifiedBandwidthLimit = dbx.Project_UserSpecifiedBandwidthLimit_Raw(val64)
+		case console.SegmentLimit:
+			updateFields.SegmentLimit = dbx.Project_SegmentLimit_Raw(val64)
+		case console.BucketsLimit:
+			updateFields.MaxBuckets = dbx.Project_MaxBuckets_Raw(val32)
+		case console.RateLimit:
+			updateFields.RateLimit = dbx.Project_RateLimit_Raw(val32)
+		case console.BurstLimit:
+			updateFields.BurstLimit = dbx.Project_BurstLimit_Raw(val32)
+		case console.RateLimitHead:
+			updateFields.RateLimitHead = dbx.Project_RateLimitHead_Raw(val32)
+		case console.BurstLimitHead:
+			updateFields.BurstLimitHead = dbx.Project_BurstLimitHead_Raw(val32)
+		case console.RateLimitGet:
+			updateFields.RateLimitGet = dbx.Project_RateLimitGet_Raw(val32)
+		case console.BurstLimitGet:
+			updateFields.BurstLimitGet = dbx.Project_BurstLimitGet_Raw(val32)
+		case console.RateLimitPut:
+			updateFields.RateLimitPut = dbx.Project_RateLimitPut_Raw(val32)
+		case console.BurstLimitPut:
+			updateFields.BurstLimitPut = dbx.Project_BurstLimitPut_Raw(val32)
+		case console.RateLimitList:
+			updateFields.RateLimitList = dbx.Project_RateLimitList_Raw(val32)
+		case console.BurstLimitList:
+			updateFields.BurstLimitList = dbx.Project_BurstLimitList_Raw(val32)
+		case console.RateLimitDelete:
+			updateFields.RateLimitDel = dbx.Project_RateLimitDel_Raw(val32)
+		case console.BurstLimitDelete:
+			updateFields.BurstLimitDel = dbx.Project_BurstLimitDel_Raw(val32)
+		default:
+			return errs.New("Limit kind not supported in update. No limits updated. Limit kind: %d", limit.Kind)
+		}
+
+	}
+	_, err = projects.db.Update_Project_By_Id(ctx,
+		dbx.Project_Id(id[:]),
+		updateFields,
+	)
+
+	return err
+
+}
+
 // UpdateUserAgent is a method for updating projects user agent.
 func (projects *projects) UpdateUserAgent(ctx context.Context, id uuid.UUID, userAgent []byte) (err error) {
 	defer mon.Task()(&ctx)(&err)
@@ -514,7 +589,7 @@ func (projects *projects) ListByOwnerID(
 		Offset:      int64((cursor.Page - 1) * cursor.Limit),
 	}
 
-	countRow := projects.sdb.QueryRowContext(ctx, projects.sdb.Rebind(`
+	countRow := projects.db.QueryRowContext(ctx, projects.db.Rebind(`
 		SELECT COUNT(*) FROM projects WHERE owner_id = ?
 	`), ownerID)
 	err = countRow.Scan(&page.TotalCount)
@@ -526,7 +601,7 @@ func (projects *projects) ListByOwnerID(
 		page.PageCount++
 	}
 
-	rows, err := projects.sdb.Query(ctx, projects.sdb.Rebind(`
+	rows, err := projects.db.QueryContext(ctx, projects.db.Rebind(`
 		SELECT
 			id,
 			public_id,
@@ -638,6 +713,16 @@ func ProjectFromDBX(ctx context.Context, project *dbx.Project) (_ *console.Proje
 		OwnerID:                     ownerID,
 		RateLimit:                   project.RateLimit,
 		BurstLimit:                  project.BurstLimit,
+		RateLimitHead:               project.RateLimitHead,
+		BurstLimitHead:              project.BurstLimitHead,
+		RateLimitGet:                project.RateLimitGet,
+		BurstLimitGet:               project.BurstLimitGet,
+		RateLimitPut:                project.RateLimitPut,
+		BurstLimitPut:               project.BurstLimitPut,
+		RateLimitList:               project.RateLimitList,
+		BurstLimitList:              project.BurstLimitList,
+		RateLimitDelete:             project.RateLimitDel,
+		BurstLimitDelete:            project.BurstLimitDel,
 		MaxBuckets:                  project.MaxBuckets,
 		CreatedAt:                   project.CreatedAt,
 		StorageLimit:                (*memory.Size)(project.UsageLimit),

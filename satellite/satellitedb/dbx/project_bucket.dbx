@@ -89,6 +89,13 @@ update bucket_metainfo (
 	where bucket_metainfo.versioning >= ?
 )
 
+update bucket_metainfo (
+	where bucket_metainfo.project_id = ?
+	where bucket_metainfo.name = ?
+	where bucket_metainfo.versioning >= ?
+	where bucket_metainfo.object_lock_enabled = false
+)
+
 read one (
 	select bucket_metainfo
 	where bucket_metainfo.project_id = ?
@@ -96,25 +103,31 @@ read one (
 )
 
 read one (
-	select bucket_metainfo.created_by bucket_metainfo.created_at
+	select bucket_metainfo.created_by bucket_metainfo.created_at bucket_metainfo.placement
 	where bucket_metainfo.project_id = ?
 	where bucket_metainfo.name = ?
 )
 
 read one (
-    select bucket_metainfo.placement
+	select bucket_metainfo.placement
 	where bucket_metainfo.project_id = ?
 	where bucket_metainfo.name = ?
 )
 
 read one (
-    select bucket_metainfo.user_agent
+	select bucket_metainfo.user_agent
 	where bucket_metainfo.project_id = ?
 	where bucket_metainfo.name = ?
 )
 
 read one (
-    select bucket_metainfo.versioning
+	select bucket_metainfo.versioning
+	where bucket_metainfo.project_id = ?
+	where bucket_metainfo.name = ?
+)
+
+read one (
+    select bucket_metainfo.object_lock_enabled
 	where bucket_metainfo.project_id = ?
 	where bucket_metainfo.name = ?
 )
@@ -183,7 +196,7 @@ update value_attribution (
 )
 
 read one (
-    select value_attribution
+	select value_attribution
 	where value_attribution.project_id = ?
 	where value_attribution.bucket_name = ?
 )

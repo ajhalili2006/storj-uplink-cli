@@ -9,9 +9,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/storj/exp-spanner"
+	"cloud.google.com/go/spanner"
 	"github.com/zeebo/errs"
-	"google.golang.org/api/iterator"
 
 	"storj.io/common/uuid"
 	"storj.io/storj/shared/dbutil/pgutil"
@@ -22,7 +21,7 @@ import (
 type commitObjectWithSegmentsTransactionAdapter interface {
 	fetchSegmentsForCommit(ctx context.Context, streamID uuid.UUID) (segments []segmentInfoForCommit, err error)
 	finalizeObjectCommitWithSegments(ctx context.Context, opts CommitObjectWithSegments, nextStatus ObjectStatus, finalSegments []segmentToCommit, totalPlainSize int64, totalEncryptedSize int64, fixedSegmentSize int32, nextVersion Version, object *Object) error
-	deleteSegmentsNotInCommit(ctx context.Context, streamID uuid.UUID, segments []SegmentPosition, aliasCache *NodeAliasCache) (deletedSegments []DeletedSegmentInfo, err error)
+	deleteSegmentsNotInCommit(ctx context.Context, streamID uuid.UUID, segments []SegmentPosition) (deletedSegmentCount int64, err error)
 
 	precommitTransactionAdapter
 }
@@ -51,16 +50,17 @@ type CommitObjectWithSegments struct {
 // CommitObjectWithSegments commits pending object to the database.
 //
 // TODO: not ready for production.
-func (db *DB) CommitObjectWithSegments(ctx context.Context, opts CommitObjectWithSegments) (object Object, deletedSegments []DeletedSegmentInfo, err error) {
+func (db *DB) CommitObjectWithSegments(ctx context.Context, opts CommitObjectWithSegments) (object Object, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	if err := opts.ObjectStream.Verify(); err != nil {
-		return Object{}, nil, err
+		return Object{}, err
 	}
 	if err := verifySegmentOrder(opts.Segments); err != nil {
-		return Object{}, nil, err
+		return Object{}, err
 	}
 
+	var deletedSegmentCount int64
 	var precommit PrecommitConstraintResult
 	err = db.ChooseAdapter(opts.ProjectID).WithTx(ctx, func(ctx context.Context, adapter TransactionAdapter) error {
 		// TODO: should we prevent this from executing when the object has been committed
@@ -91,7 +91,7 @@ func (db *DB) CommitObjectWithSegments(ctx context.Context, opts CommitObjectWit
 			return err
 		}
 
-		deletedSegments, err = adapter.deleteSegmentsNotInCommit(ctx, opts.StreamID, segmentsToDelete, db.aliasCache)
+		deletedSegmentCount, err = adapter.deleteSegmentsNotInCommit(ctx, opts.StreamID, segmentsToDelete)
 		if err != nil {
 			return err
 		}
@@ -145,7 +145,7 @@ func (db *DB) CommitObjectWithSegments(ctx context.Context, opts CommitObjectWit
 		return nil
 	})
 	if err != nil {
-		return Object{}, nil, err
+		return Object{}, err
 	}
 
 	precommit.submitMetrics()
@@ -153,9 +153,9 @@ func (db *DB) CommitObjectWithSegments(ctx context.Context, opts CommitObjectWit
 	mon.Meter("object_commit").Mark(1)
 	mon.IntVal("object_commit_segments").Observe(int64(object.SegmentCount))
 	mon.IntVal("object_commit_encrypted_size").Observe(object.TotalEncryptedSize)
-	mon.Meter("segment_delete").Mark(len(deletedSegments))
+	mon.Meter("segment_delete").Mark64(deletedSegmentCount)
 
-	return object, deletedSegments, nil
+	return object, nil
 }
 
 func (ptx *postgresTransactionAdapter) finalizeObjectCommitWithSegments(ctx context.Context, opts CommitObjectWithSegments, nextStatus ObjectStatus, finalSegments []segmentToCommit, totalPlainSize int64, totalEncryptedSize int64, fixedSegmentSize int32, nextVersion Version, object *Object) (err error) {
@@ -208,7 +208,8 @@ func (stx *spannerTransactionAdapter) finalizeObjectCommitWithSegments(ctx conte
 	// and that column is part of the primary key. We must delete the row and
 	// insert a new one.
 
-	result := stx.tx.Query(ctx, spanner.Statement{
+	deleted := false
+	err = stx.tx.Query(ctx, spanner.Statement{
 		SQL: `
 			DELETE FROM objects
 			WHERE project_id    = @project_id
@@ -227,19 +228,19 @@ func (stx *spannerTransactionAdapter) finalizeObjectCommitWithSegments(ctx conte
 			"previous_version": opts.Version,
 			"stream_id":        opts.StreamID,
 		},
-	})
-	defer result.Stop()
-
-	row, err := result.Next()
-	if err != nil {
-		if errors.Is(err, iterator.Done) {
-			return ErrObjectNotFound.Wrap(Error.New("object with specified version and pending status is missing"))
+	}).Do(func(row *spanner.Row) error {
+		deleted = true
+		err := row.Columns(&object.CreatedAt, &object.ExpiresAt, encryptionParameters{&object.Encryption})
+		if err != nil {
+			return Error.New("failed to read old object details: %w", err)
 		}
+		return nil
+	})
+	if err != nil {
 		return Error.New("failed to update object: %w", err)
 	}
-	err = row.Columns(&object.CreatedAt, &object.ExpiresAt, encryptionParameters{&object.Encryption})
-	if err != nil {
-		return Error.New("failed to read old object details: %w", err)
+	if !deleted {
+		return ErrObjectNotFound.Wrap(Error.New("object with specified version and pending status is missing"))
 	}
 
 	_, err = stx.tx.Update(ctx, spanner.Statement{
@@ -338,7 +339,7 @@ func (ptx *postgresTransactionAdapter) fetchSegmentsForCommit(ctx context.Contex
 func (stx *spannerTransactionAdapter) fetchSegmentsForCommit(ctx context.Context, streamID uuid.UUID) (segments []segmentInfoForCommit, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	result := stx.tx.Query(ctx, spanner.Statement{
+	segments, err = spannerutil.CollectRows(stx.tx.Query(ctx, spanner.Statement{
 		SQL: `
 			SELECT position, encrypted_size, plain_offset, plain_size
 			FROM segments
@@ -348,24 +349,13 @@ func (stx *spannerTransactionAdapter) fetchSegmentsForCommit(ctx context.Context
 		Params: map[string]interface{}{
 			"stream_id": streamID,
 		},
+	}), func(row *spanner.Row, segment *segmentInfoForCommit) error {
+		return Error.Wrap(row.Columns(
+			&segment.Position, spannerutil.Int(&segment.EncryptedSize), &segment.PlainOffset, spannerutil.Int(&segment.PlainSize),
+		))
 	})
-	defer result.Stop()
 
-	for {
-		row, err := result.Next()
-		if err != nil {
-			if errors.Is(err, iterator.Done) {
-				break
-			}
-			return nil, Error.New("failed to fetch segments: %w", err)
-		}
-		var segment segmentInfoForCommit
-		if err := row.Columns(&segment.Position, spannerutil.Int(&segment.EncryptedSize), &segment.PlainOffset, spannerutil.Int(&segment.PlainSize)); err != nil {
-			return nil, Error.New("failed to scan segments: %w", err)
-		}
-		segments = append(segments, segment)
-	}
-	return segments, nil
+	return segments, Error.Wrap(err)
 }
 
 type segmentToCommit struct {
@@ -521,10 +511,10 @@ func (stx *spannerTransactionAdapter) updateSegmentOffsets(ctx context.Context, 
 }
 
 // deleteSegmentsNotInCommit deletes the listed segments inside the tx.
-func (ptx *postgresTransactionAdapter) deleteSegmentsNotInCommit(ctx context.Context, streamID uuid.UUID, segments []SegmentPosition, aliasCache *NodeAliasCache) (deletedSegments []DeletedSegmentInfo, err error) {
+func (ptx *postgresTransactionAdapter) deleteSegmentsNotInCommit(ctx context.Context, streamID uuid.UUID, segments []SegmentPosition) (deletedSegmentCount int64, err error) {
 	defer mon.Task()(&ctx)(&err)
 	if len(segments) == 0 {
-		return nil, nil
+		return 0, nil
 	}
 
 	positions := []int64{}
@@ -533,42 +523,26 @@ func (ptx *postgresTransactionAdapter) deleteSegmentsNotInCommit(ctx context.Con
 	}
 
 	// This potentially could be done together with the previous database call.
-	err = withRows(ptx.tx.QueryContext(ctx, `
-			DELETE FROM segments
-			WHERE stream_id = $1 AND position = ANY($2)
-			RETURNING root_piece_id, remote_alias_pieces
-		`, streamID, pgutil.Int8Array(positions)))(func(rows tagsql.Rows) error {
-		for rows.Next() {
-			var deleted DeletedSegmentInfo
-			var aliasPieces AliasPieces
-			err := rows.Scan(&deleted.RootPieceID, &aliasPieces)
-			if err != nil {
-				return Error.New("failed to scan segments: %w", err)
-			}
-			// we don't need to report info about inline segments
-			if deleted.RootPieceID.IsZero() {
-				continue
-			}
-
-			deleted.Pieces, err = aliasCache.ConvertAliasesToPieces(ctx, aliasPieces)
-			if err != nil {
-				return Error.New("failed to convert aliases: %w", err)
-			}
-			deletedSegments = append(deletedSegments, deleted)
-		}
-		return nil
-	})
+	result, err := ptx.tx.ExecContext(ctx, `
+		DELETE FROM segments
+		WHERE stream_id = $1 AND position = ANY($2)
+	`, streamID, pgutil.Int8Array(positions))
 	if err != nil {
-		return nil, Error.New("unable to delete segments: %w", err)
+		return 0, Error.New("unable to delete segments: %w", err)
 	}
 
-	return deletedSegments, nil
+	deletedCount, err := result.RowsAffected()
+	if err != nil {
+		return 0, Error.New("unable to count deleted segments: %w", err)
+	}
+
+	return deletedCount, nil
 }
 
-func (stx *spannerTransactionAdapter) deleteSegmentsNotInCommit(ctx context.Context, streamID uuid.UUID, segments []SegmentPosition, aliasCache *NodeAliasCache) (deletedSegments []DeletedSegmentInfo, err error) {
+func (stx *spannerTransactionAdapter) deleteSegmentsNotInCommit(ctx context.Context, streamID uuid.UUID, segments []SegmentPosition) (deletedSegmentCount int64, err error) {
 	defer mon.Task()(&ctx)(&err)
 	if len(segments) == 0 {
-		return nil, nil
+		return 0, nil
 	}
 
 	positions := make([]int64, 0, len(segments))
@@ -576,47 +550,21 @@ func (stx *spannerTransactionAdapter) deleteSegmentsNotInCommit(ctx context.Cont
 		positions = append(positions, int64(p.Encode()))
 	}
 
-	// This potentially could be done together with the previous database call.
-	result := stx.tx.Query(ctx, spanner.Statement{
+	deletedSegmentCount, err = stx.tx.Update(ctx, spanner.Statement{
 		SQL: `
 			DELETE FROM segments
 			WHERE stream_id = @stream_id AND ARRAY_INCLUDES(@positions, position)
-			THEN RETURN root_piece_id, remote_alias_pieces
 		`,
 		Params: map[string]interface{}{
 			"stream_id": streamID,
 			"positions": positions,
 		},
 	})
-	defer result.Stop()
-
-	for {
-		row, err := result.Next()
-		if err != nil {
-			if errors.Is(err, iterator.Done) {
-				break
-			}
-			return nil, Error.New("unable to delete segments: %w", err)
-		}
-		var deleted DeletedSegmentInfo
-		var aliasPieces AliasPieces
-		err = row.Columns(&deleted.RootPieceID, &aliasPieces)
-		if err != nil {
-			return nil, Error.New("failed to scan segments: %w", err)
-		}
-		// we don't need to report info about inline segments
-		if deleted.RootPieceID.IsZero() {
-			continue
-		}
-
-		deleted.Pieces, err = aliasCache.ConvertAliasesToPieces(ctx, aliasPieces)
-		if err != nil {
-			return nil, Error.New("failed to convert aliases: %w", err)
-		}
-		deletedSegments = append(deletedSegments, deleted)
+	if err != nil {
+		return 0, Error.New("unable to delete segments: %w", err)
 	}
 
-	return deletedSegments, nil
+	return deletedSegmentCount, nil
 }
 
 // diffSegmentsWithDatabase matches up segment positions with their database information.

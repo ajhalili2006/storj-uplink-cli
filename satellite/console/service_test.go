@@ -17,6 +17,7 @@ import (
 
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
+	stripeLib "github.com/stripe/stripe-go/v75"
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
@@ -37,6 +38,7 @@ import (
 	"storj.io/storj/satellite/buckets"
 	"storj.io/storj/satellite/console"
 	"storj.io/storj/satellite/console/consoleweb/consoleapi"
+	"storj.io/storj/satellite/kms"
 	"storj.io/storj/satellite/nodeselection"
 	"storj.io/storj/satellite/payments"
 	"storj.io/storj/satellite/payments/billing"
@@ -68,6 +70,7 @@ func TestService(t *testing.T) {
 		func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
 			sat := planet.Satellites[0]
 			service := sat.API.Console.Service
+			stripeClient := sat.API.Payments.StripeClient
 
 			up1Proj, err := sat.API.DB.Console().Projects().Get(ctx, planet.Uplinks[0].Projects[0].ID)
 			require.NoError(t, err)
@@ -238,6 +241,89 @@ func TestService(t *testing.T) {
 				cards, err := service.Payments().ListCreditCards(userCtx1)
 				require.NoError(t, err)
 				require.Len(t, cards, 1)
+
+				cus, err := sat.Core.DB.StripeCoinPayments().Customers().GetCustomerID(ctx, up1Proj.OwnerID)
+				require.NoError(t, err)
+
+				inv, err := stripeClient.Invoices().New(&stripeLib.InvoiceParams{
+					Params:   stripeLib.Params{Context: ctx},
+					Customer: &cus,
+				})
+				require.NoError(t, err)
+
+				inv, err = stripeClient.Invoices().FinalizeInvoice(inv.ID, &stripeLib.InvoiceFinalizeInvoiceParams{
+					Params: stripeLib.Params{Context: ctx},
+				})
+				require.NoError(t, err)
+
+				// add a credit card to pay the invoice
+				_, err = service.Payments().AddCreditCard(userCtx1, "test-cc-token2")
+				require.NoError(t, err)
+
+				inv, err = stripeClient.Invoices().Get(inv.ID, &stripeLib.InvoiceParams{
+					Params: stripeLib.Params{Context: ctx},
+				})
+				require.NoError(t, err)
+				require.Equal(t, stripeLib.InvoiceStatusPaid, inv.Status)
+			})
+
+			t.Run("AddCreditCardByPaymentMethodID", func(t *testing.T) {
+				// user should be in free tier
+				user, userCtx3 := getOwnerAndCtx(ctx, up3Proj)
+				require.False(t, user.PaidTier)
+
+				pm, err := stripeClient.PaymentMethods().New(&stripeLib.PaymentMethodParams{
+					Type: stripeLib.String(string(stripeLib.PaymentMethodTypeCard)),
+					Card: &stripeLib.PaymentMethodCardParams{
+						Token: stripeLib.String("test"),
+					},
+				})
+				require.NoError(t, err)
+
+				pm2, err := stripeClient.PaymentMethods().New(&stripeLib.PaymentMethodParams{
+					Type: stripeLib.String(string(stripeLib.PaymentMethodTypeCard)),
+					Card: &stripeLib.PaymentMethodCardParams{
+						Token: stripeLib.String("test2"),
+					},
+				})
+				require.NoError(t, err)
+
+				// add a credit card to put the user in the paid tier
+				card, err := service.Payments().AddCardByPaymentMethodID(userCtx3, pm.ID)
+				require.NoError(t, err)
+				require.NotEmpty(t, card)
+				// user should be in paid tier
+				user, err = service.GetUser(ctx, up3Proj.OwnerID)
+				require.NoError(t, err)
+				require.True(t, user.PaidTier)
+
+				cards, err := service.Payments().ListCreditCards(userCtx3)
+				require.NoError(t, err)
+				require.Len(t, cards, 1)
+
+				cus, err := sat.Core.DB.StripeCoinPayments().Customers().GetCustomerID(ctx, up3Proj.OwnerID)
+				require.NoError(t, err)
+
+				inv, err := stripeClient.Invoices().New(&stripeLib.InvoiceParams{
+					Params:   stripeLib.Params{Context: ctx},
+					Customer: &cus,
+				})
+				require.NoError(t, err)
+
+				inv, err = stripeClient.Invoices().FinalizeInvoice(inv.ID, &stripeLib.InvoiceFinalizeInvoiceParams{
+					Params: stripeLib.Params{Context: ctx},
+				})
+				require.NoError(t, err)
+
+				// add a credit card to pay the invoice
+				_, err = service.Payments().AddCardByPaymentMethodID(userCtx3, pm2.ID)
+				require.NoError(t, err)
+
+				inv, err = stripeClient.Invoices().Get(inv.ID, &stripeLib.InvoiceParams{
+					Params: stripeLib.Params{Context: ctx},
+				})
+				require.NoError(t, err)
+				require.Equal(t, stripeLib.InvoiceStatusPaid, inv.Status)
 			})
 
 			t.Run("Exit trial expiration freeze", func(t *testing.T) {
@@ -347,8 +433,8 @@ func TestService(t *testing.T) {
 				updatedProject, err := service.UpdateProject(userCtx1, up1Proj.ID, console.UpsertProjectInfo{
 					Name:           updatedName,
 					Description:    updatedDescription,
-					StorageLimit:   updatedStorageLimit,
-					BandwidthLimit: updatedBandwidthLimit,
+					StorageLimit:   &updatedStorageLimit,
+					BandwidthLimit: &updatedBandwidthLimit,
 				})
 				require.NoError(t, err)
 				require.NotEqual(t, up1Proj.Name, updatedProject.Name)
@@ -364,8 +450,8 @@ func TestService(t *testing.T) {
 				updatedProject, err = service.UpdateProject(userCtx1, up2Proj.ID, console.UpsertProjectInfo{
 					Name:           "newName",
 					Description:    "TestUpdate",
-					StorageLimit:   memory.Size(100),
-					BandwidthLimit: memory.Size(100),
+					StorageLimit:   &updatedStorageLimit,
+					BandwidthLimit: &updatedBandwidthLimit,
 				})
 				require.Error(t, err)
 				require.Nil(t, updatedProject)
@@ -383,8 +469,8 @@ func TestService(t *testing.T) {
 				updateInfo := console.UpsertProjectInfo{
 					Name:           "a b c",
 					Description:    "1 2 3",
-					StorageLimit:   memory.Size(123),
-					BandwidthLimit: memory.Size(123),
+					StorageLimit:   size100,
+					BandwidthLimit: size100,
 				}
 				updatedProject, err = service.UpdateProject(userCtx1, up1Proj.ID, updateInfo)
 				require.Error(t, err)
@@ -405,20 +491,23 @@ func TestService(t *testing.T) {
 				err = sat.DB.Console().Projects().Update(ctx, up1Proj)
 				require.NoError(t, err)
 
+				limit := memory.Size(0)
 				// should not be able to set limit to zero.
 				updatedProject, err = service.UpdateProject(userCtx1, up1Proj.ID, console.UpsertProjectInfo{
 					Name:           up1Proj.Name,
-					StorageLimit:   memory.Size(0),
-					BandwidthLimit: memory.Size(0),
+					StorageLimit:   &limit,
+					BandwidthLimit: &limit,
 				})
 				require.True(t, console.ErrInvalidProjectLimit.Has(err))
 				require.Nil(t, updatedProject)
 
 				// should not be able to set limit more than tier limit.
+				biggerStorage := sat.Config.Console.UsageLimits.Storage.Paid + memory.MB
+				biggerBandwidth := sat.Config.Console.UsageLimits.Bandwidth.Paid + memory.MB
 				updatedProject, err = service.UpdateProject(userCtx1, up1Proj.ID, console.UpsertProjectInfo{
 					Name:           up1Proj.Name,
-					StorageLimit:   sat.Config.Console.UsageLimits.Storage.Paid + memory.MB,
-					BandwidthLimit: sat.Config.Console.UsageLimits.Bandwidth.Paid + memory.MB,
+					StorageLimit:   &biggerStorage,
+					BandwidthLimit: &biggerBandwidth,
 				})
 				require.True(t, console.ErrInvalidProjectLimit.Has(err))
 				require.Nil(t, updatedProject)
@@ -429,13 +518,23 @@ func TestService(t *testing.T) {
 				require.Equal(t, updateInfo.Description, updatedProject.Description)
 				require.NotNil(t, updatedProject.StorageLimit)
 				require.NotNil(t, updatedProject.BandwidthLimit)
-				require.Equal(t, updateInfo.StorageLimit, *updatedProject.UserSpecifiedStorageLimit)
-				require.Equal(t, updateInfo.BandwidthLimit, *updatedProject.UserSpecifiedBandwidthLimit)
+				require.Equal(t, updateInfo.StorageLimit, updatedProject.UserSpecifiedStorageLimit)
+				require.Equal(t, updateInfo.BandwidthLimit, updatedProject.UserSpecifiedBandwidthLimit)
+
+				// updating project with nil limits should skip updating the limits.
+				updatedProject, err = service.UpdateProject(userCtx1, up1Proj.ID, console.UpsertProjectInfo{
+					Name:           updateInfo.Name,
+					StorageLimit:   nil,
+					BandwidthLimit: nil,
+				})
+				require.NoError(t, err)
+				require.Equal(t, updateInfo.StorageLimit, updatedProject.UserSpecifiedStorageLimit)
+				require.Equal(t, updateInfo.BandwidthLimit, updatedProject.UserSpecifiedBandwidthLimit)
 
 				project, err := service.GetProject(userCtx1, up1Proj.ID)
 				require.NoError(t, err)
-				require.Equal(t, updateInfo.StorageLimit, *project.UserSpecifiedStorageLimit)
-				require.Equal(t, updateInfo.BandwidthLimit, *project.UserSpecifiedBandwidthLimit)
+				require.Equal(t, updateInfo.StorageLimit, project.UserSpecifiedStorageLimit)
+				require.Equal(t, updateInfo.BandwidthLimit, project.UserSpecifiedBandwidthLimit)
 
 				// attempting to update a project with a previously used name should fail
 				updatedProject, err = service.UpdateProject(userCtx1, up2Proj.ID, console.UpsertProjectInfo{
@@ -456,6 +555,56 @@ func TestService(t *testing.T) {
 				// remove user2.
 				err = service.DeleteProjectMembersAndInvitations(userCtx1, up1Proj.ID, []string{user2.Email})
 				require.NoError(t, err)
+			})
+
+			t.Run("UpdateUserSpecifiedProjectLimits", func(t *testing.T) {
+				updatedStorageLimit := memory.Size(100)
+				updatedBandwidthLimit := memory.Size(100)
+
+				_, userCtx1 := getOwnerAndCtx(ctx, up1Proj)
+
+				// Updating own limits should work
+				err = service.UpdateUserSpecifiedLimits(userCtx1, up1Proj.ID, console.UpdateLimitsInfo{
+					StorageLimit:   &updatedStorageLimit,
+					BandwidthLimit: &updatedBandwidthLimit,
+				})
+				require.NoError(t, err)
+
+				project, err := service.GetProject(userCtx1, up1Proj.ID)
+				require.NoError(t, err)
+				require.Equal(t, updatedStorageLimit, *project.UserSpecifiedStorageLimit)
+				require.Equal(t, updatedBandwidthLimit, *project.UserSpecifiedBandwidthLimit)
+
+				// Updating someone else project limits should not work
+				err = service.UpdateUserSpecifiedLimits(userCtx1, up2Proj.ID, console.UpdateLimitsInfo{
+					StorageLimit:   &updatedStorageLimit,
+					BandwidthLimit: &updatedBandwidthLimit,
+				})
+				require.Error(t, err)
+
+				limit100 := memory.Size(100)
+				// updating only storage limit should work
+				err = service.UpdateUserSpecifiedLimits(userCtx1, up1Proj.ID, console.UpdateLimitsInfo{
+					StorageLimit: &limit100,
+				})
+				require.NoError(t, err)
+
+				project, err = service.GetProject(userCtx1, up1Proj.ID)
+				require.NoError(t, err)
+				require.Equal(t, limit100, *project.UserSpecifiedStorageLimit)
+				require.Equal(t, updatedBandwidthLimit, *project.UserSpecifiedBandwidthLimit)
+
+				limit0 := memory.Size(0)
+				// passing 0 should remove the limit.
+				err = service.UpdateUserSpecifiedLimits(userCtx1, up1Proj.ID, console.UpdateLimitsInfo{
+					StorageLimit: &limit0,
+				})
+				require.NoError(t, err)
+
+				project, err = service.GetProject(userCtx1, up1Proj.ID)
+				require.NoError(t, err)
+				require.Nil(t, project.UserSpecifiedStorageLimit)
+				require.Equal(t, updatedBandwidthLimit, *project.UserSpecifiedBandwidthLimit)
 			})
 
 			t.Run("AddProjectMembers", func(t *testing.T) {
@@ -631,7 +780,7 @@ func TestService(t *testing.T) {
 			})
 
 			t.Run("CreateAPIKey", func(t *testing.T) {
-				createdAPIKey, _, err := service.CreateAPIKey(userCtx2, up2Proj.ID, "test key")
+				createdAPIKey, _, err := service.CreateAPIKey(userCtx2, up2Proj.ID, "test key", macaroon.APIKeyVersionMin)
 				require.NoError(t, err)
 				require.NotNil(t, createdAPIKey)
 				require.Equal(t, up2Proj.OwnerID, createdAPIKey.CreatedBy)
@@ -664,10 +813,10 @@ func TestService(t *testing.T) {
 				_, err = service.UpdateProjectMemberRole(ownerCtx, member.ID, pr.ID, console.RoleMember)
 				require.NoError(t, err)
 
-				ownerKey, _, err := service.CreateAPIKey(ownerCtx, pr.ID, "owner's key")
+				ownerKey, _, err := service.CreateAPIKey(ownerCtx, pr.ID, "owner's key", macaroon.APIKeyVersionMin)
 				require.NoError(t, err)
 				require.NotNil(t, ownerKey)
-				memberKey, _, err := service.CreateAPIKey(memberCtx, pr.ID, "member's key")
+				memberKey, _, err := service.CreateAPIKey(memberCtx, pr.ID, "member's key", macaroon.APIKeyVersionMin)
 				require.NoError(t, err)
 				require.NotNil(t, memberKey)
 
@@ -679,10 +828,10 @@ func TestService(t *testing.T) {
 				err = service.DeleteAPIKeys(ownerCtx, []uuid.UUID{ownerKey.ID, memberKey.ID})
 				require.NoError(t, err)
 
-				ownerKey, _, err = service.CreateAPIKey(ownerCtx, pr.ID, "owner's key")
+				ownerKey, _, err = service.CreateAPIKey(ownerCtx, pr.ID, "owner's key", macaroon.APIKeyVersionMin)
 				require.NoError(t, err)
 				require.NotNil(t, ownerKey)
-				memberKey, _, err = service.CreateAPIKey(memberCtx, pr.ID, "member's key")
+				memberKey, _, err = service.CreateAPIKey(memberCtx, pr.ID, "member's key", macaroon.APIKeyVersionMin)
 				require.NoError(t, err)
 				require.NotNil(t, memberKey)
 
@@ -1276,6 +1425,400 @@ func TestService(t *testing.T) {
 				require.False(t, config.PromptForVersioningBeta)
 			})
 		})
+}
+
+func TestChangeEmail(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: 0, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				config.Console.EmailChangeFlowEnabled = true
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		db := sat.DB
+		service := sat.API.Console.Service
+		usrLogin := planet.Uplinks[0].User[sat.ID()]
+
+		user, _, err := service.GetUserByEmailWithUnverified(ctx, usrLogin.Email)
+		require.NoError(t, err)
+		require.NotNil(t, user)
+
+		updateContext := func() (context.Context, *console.User) {
+			userCtx, err := sat.UserContext(ctx, user.ID)
+			require.NoError(t, err)
+			user, err := console.GetUser(userCtx)
+			require.NoError(t, err)
+			return userCtx, user
+		}
+		userCtx, user := updateContext()
+
+		// 2fa is disabled.
+		err = service.ChangeEmail(userCtx, console.VerifyAccountMfaStep, "test")
+		require.NoError(t, err)
+
+		mfaSecret, err := service.ResetMFASecretKey(userCtx)
+		require.NoError(t, err)
+
+		now := time.Now()
+		goodCode, err := console.NewMFAPasscode(mfaSecret, now)
+		require.NoError(t, err)
+
+		err = service.EnableUserMFA(userCtx, goodCode, now)
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.NotEmpty(t, user.MFASecretKey)
+		require.Zero(t, user.EmailChangeVerificationStep)
+
+		// starting from second step must fail.
+		err = service.ChangeEmail(userCtx, console.VerifyAccountMfaStep, "test")
+		require.True(t, console.ErrValidation.Has(err))
+
+		userCtx, user = updateContext()
+		require.Zero(t, user.EmailChangeVerificationStep)
+
+		for i := 0; i < 2; i++ {
+			err = service.ChangeEmail(userCtx, console.VerifyAccountPasswordStep, "wrong password")
+			require.True(t, console.ErrValidation.Has(err))
+
+			userCtx, _ = updateContext()
+		}
+
+		// account gets locked after 3 failed attempts.
+		err = service.ChangeEmail(userCtx, console.VerifyAccountPasswordStep, usrLogin.Password)
+		require.True(t, console.ErrUnauthorized.Has(err))
+
+		resetAccountLock := func() error {
+			failedLoginCount := 0
+			loginLockoutExpirationPtr := &time.Time{}
+
+			return db.Console().Users().Update(ctx, user.ID, console.UpdateUserRequest{
+				FailedLoginCount:       &failedLoginCount,
+				LoginLockoutExpiration: &loginLockoutExpirationPtr,
+			})
+		}
+
+		err = resetAccountLock()
+		require.NoError(t, err)
+
+		userCtx, _ = updateContext()
+
+		err = service.ChangeEmail(userCtx, console.VerifyAccountPasswordStep, usrLogin.Password)
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.VerifyAccountPasswordStep, user.EmailChangeVerificationStep)
+
+		wrongCode, err := console.NewMFAPasscode(mfaSecret, now.Add(time.Hour))
+		require.NoError(t, err)
+
+		for i := 0; i < 3; i++ {
+			err = service.ChangeEmail(userCtx, console.VerifyAccountMfaStep, wrongCode)
+			require.True(t, console.ErrMFAPasscode.Has(err))
+
+			userCtx, _ = updateContext()
+		}
+
+		goodCode, err = console.NewMFAPasscode(mfaSecret, now)
+		require.NoError(t, err)
+
+		// account gets locked after 3 failed attempts.
+		err = service.ChangeEmail(userCtx, console.VerifyAccountMfaStep, goodCode)
+		require.True(t, console.ErrUnauthorized.Has(err))
+
+		err = resetAccountLock()
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.VerifyAccountPasswordStep, user.EmailChangeVerificationStep)
+
+		err = service.ChangeEmail(userCtx, console.VerifyAccountMfaStep, goodCode)
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.VerifyAccountMfaStep, user.EmailChangeVerificationStep)
+
+		for i := 0; i < 3; i++ {
+			err = service.ChangeEmail(userCtx, console.VerifyAccountEmailStep, "random verification code")
+			require.True(t, console.ErrValidation.Has(err))
+
+			userCtx, _ = updateContext()
+		}
+
+		// account gets locked after 3 failed attempts.
+		err = service.ChangeEmail(userCtx, console.VerifyAccountEmailStep, user.ActivationCode)
+		require.True(t, console.ErrUnauthorized.Has(err))
+
+		err = resetAccountLock()
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.VerifyAccountMfaStep, user.EmailChangeVerificationStep)
+
+		err = service.ChangeEmail(userCtx, console.VerifyAccountEmailStep, user.ActivationCode)
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.VerifyAccountEmailStep, user.EmailChangeVerificationStep)
+		require.Empty(t, user.ActivationCode)
+
+		err = service.ChangeEmail(userCtx, console.ChangeAccountEmailStep, "random string")
+		require.True(t, console.ErrValidation.Has(err))
+
+		anotherUsr, err := sat.AddUser(ctx, console.CreateUser{
+			FullName: "Test Change Email",
+			Email:    "amother.usr@mail.test",
+		}, 1)
+		require.NoError(t, err)
+
+		err = service.ChangeEmail(userCtx, console.ChangeAccountEmailStep, anotherUsr.Email)
+		require.True(t, console.ErrValidation.Has(err))
+
+		validEmail := "valid.email@mail.test"
+		err = service.ChangeEmail(userCtx, console.ChangeAccountEmailStep, validEmail)
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.ChangeAccountEmailStep, user.EmailChangeVerificationStep)
+		require.Equal(t, validEmail, *user.NewUnverifiedEmail)
+		require.NotEmpty(t, user.ActivationCode)
+
+		for i := 0; i < 3; i++ {
+			err = service.ChangeEmail(userCtx, console.VerifyNewAccountEmailStep, "random verification code")
+			require.True(t, console.ErrValidation.Has(err))
+
+			userCtx, _ = updateContext()
+		}
+
+		// account gets locked after 3 failed attempts.
+		err = service.ChangeEmail(userCtx, console.VerifyNewAccountEmailStep, user.ActivationCode)
+		require.True(t, console.ErrUnauthorized.Has(err))
+
+		err = resetAccountLock()
+		require.NoError(t, err)
+
+		userCtx, _ = updateContext()
+
+		err = service.ChangeEmail(userCtx, console.VerifyNewAccountEmailStep, user.ActivationCode)
+		require.NoError(t, err)
+
+		_, user = updateContext()
+		require.Equal(t, 0, user.EmailChangeVerificationStep)
+		require.Equal(t, "", *user.NewUnverifiedEmail)
+		require.Equal(t, validEmail, user.Email)
+		require.Empty(t, user.ActivationCode)
+	})
+}
+
+func TestDeleteAccount(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: 0, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				config.Console.SelfServeAccountDeleteEnabled = true
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		db := sat.DB
+		service := sat.API.Console.Service
+		usrLogin := planet.Uplinks[0].User[sat.ID()]
+		usrProject := planet.Uplinks[0].Projects[0]
+
+		user, _, err := service.GetUserByEmailWithUnverified(ctx, usrLogin.Email)
+		require.NoError(t, err)
+		require.NotNil(t, user)
+
+		status := console.LegalHold
+		err = db.Console().Users().Update(ctx, user.ID, console.UpdateUserRequest{Status: &status})
+		require.NoError(t, err)
+
+		updateContext := func() (context.Context, *console.User) {
+			userCtx, err := sat.UserContext(ctx, user.ID)
+			require.NoError(t, err)
+			user, err := console.GetUser(userCtx)
+			require.NoError(t, err)
+			return userCtx, user
+		}
+		userCtx, user := updateContext()
+
+		err = service.DeleteAccount(userCtx, console.VerifyAccountMfaStep, "test")
+		require.True(t, console.ErrForbidden.Has(err))
+
+		status = console.Active
+		err = db.Console().Users().Update(ctx, user.ID, console.UpdateUserRequest{Status: &status})
+		require.NoError(t, err)
+
+		userCtx, _ = updateContext()
+
+		// 2fa is disabled.
+		err = service.DeleteAccount(userCtx, console.VerifyAccountMfaStep, "test")
+		require.NoError(t, err)
+
+		mfaSecret, err := service.ResetMFASecretKey(userCtx)
+		require.NoError(t, err)
+
+		now := time.Now()
+		goodCode, err := console.NewMFAPasscode(mfaSecret, now)
+		require.NoError(t, err)
+
+		err = service.EnableUserMFA(userCtx, goodCode, now)
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.NotEmpty(t, user.MFASecretKey)
+		require.Zero(t, user.EmailChangeVerificationStep)
+
+		// starting from second step must fail.
+		err = service.DeleteAccount(userCtx, console.VerifyAccountMfaStep, "test")
+		require.True(t, console.ErrValidation.Has(err))
+
+		userCtx, user = updateContext()
+		require.Zero(t, user.EmailChangeVerificationStep)
+
+		for i := 0; i < 2; i++ {
+			err = service.DeleteAccount(userCtx, console.VerifyAccountPasswordStep, "wrong password")
+			require.True(t, console.ErrValidation.Has(err))
+
+			userCtx, _ = updateContext()
+		}
+
+		// account gets locked after 3 failed attempts.
+		err = service.DeleteAccount(userCtx, console.VerifyAccountPasswordStep, usrLogin.Password)
+		require.True(t, console.ErrUnauthorized.Has(err))
+
+		resetAccountLock := func() error {
+			failedLoginCount := 0
+			loginLockoutExpirationPtr := &time.Time{}
+
+			return db.Console().Users().Update(ctx, user.ID, console.UpdateUserRequest{
+				FailedLoginCount:       &failedLoginCount,
+				LoginLockoutExpiration: &loginLockoutExpirationPtr,
+			})
+		}
+
+		err = resetAccountLock()
+		require.NoError(t, err)
+
+		userCtx, _ = updateContext()
+
+		err = service.DeleteAccount(userCtx, console.VerifyAccountPasswordStep, usrLogin.Password)
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.VerifyAccountPasswordStep, user.EmailChangeVerificationStep)
+
+		wrongCode, err := console.NewMFAPasscode(mfaSecret, now.Add(time.Hour))
+		require.NoError(t, err)
+
+		for i := 0; i < 3; i++ {
+			err = service.DeleteAccount(userCtx, console.VerifyAccountMfaStep, wrongCode)
+			require.True(t, console.ErrMFAPasscode.Has(err))
+
+			userCtx, _ = updateContext()
+		}
+
+		goodCode, err = console.NewMFAPasscode(mfaSecret, now)
+		require.NoError(t, err)
+
+		// account gets locked after 3 failed attempts.
+		err = service.DeleteAccount(userCtx, console.VerifyAccountMfaStep, goodCode)
+		require.True(t, console.ErrUnauthorized.Has(err))
+
+		err = resetAccountLock()
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.VerifyAccountPasswordStep, user.EmailChangeVerificationStep)
+
+		err = service.DeleteAccount(userCtx, console.VerifyAccountMfaStep, goodCode)
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.VerifyAccountMfaStep, user.EmailChangeVerificationStep)
+
+		for i := 0; i < 3; i++ {
+			err = service.DeleteAccount(userCtx, console.VerifyAccountEmailStep, "random verification code")
+			require.True(t, console.ErrValidation.Has(err))
+
+			userCtx, _ = updateContext()
+		}
+
+		// account gets locked after 3 failed attempts.
+		err = service.DeleteAccount(userCtx, console.VerifyAccountEmailStep, user.ActivationCode)
+		require.True(t, console.ErrUnauthorized.Has(err))
+
+		err = resetAccountLock()
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.VerifyAccountMfaStep, user.EmailChangeVerificationStep)
+
+		err = service.DeleteAccount(userCtx, console.VerifyAccountEmailStep, user.ActivationCode)
+		require.NoError(t, err)
+
+		userCtx, user = updateContext()
+		require.Equal(t, console.VerifyAccountEmailStep, user.EmailChangeVerificationStep)
+		require.Empty(t, user.ActivationCode)
+
+		service.TestSetNow(func() time.Time {
+			return now
+		})
+
+		key, err := macaroon.NewAPIKey([]byte("testSecret"))
+		require.NoError(t, err)
+
+		keyInfo := console.APIKeyInfo{
+			Name:      "key",
+			ProjectID: usrProject.ID,
+			Secret:    []byte("testSecret"),
+		}
+
+		createdKey, err := db.Console().APIKeys().Create(ctx, key.Head(), keyInfo)
+		require.NotNil(t, createdKey)
+		require.NoError(t, err)
+
+		err = service.DeleteAccount(userCtx, console.DeleteAccountStep, "")
+		require.NoError(t, err)
+
+		_, user = updateContext()
+		require.Equal(t, 0, user.EmailChangeVerificationStep)
+		require.Equal(t, console.UserRequestedDeletion, user.Status)
+		require.WithinDuration(t, now, *user.StatusUpdatedAt, time.Minute)
+		require.Empty(t, user.ActivationCode)
+		require.Zero(t, user.ProjectLimit)
+		require.Zero(t, user.ProjectStorageLimit)
+		require.Zero(t, user.ProjectBandwidthLimit)
+		require.Zero(t, user.ProjectSegmentLimit)
+
+		projects, err := db.Console().Projects().GetOwn(ctx, user.ID)
+		require.NoError(t, err)
+		require.NotZero(t, len(projects))
+
+		for _, p := range projects {
+			require.Zero(t, *p.StorageLimit)
+			require.Zero(t, *p.BandwidthLimit)
+			require.Zero(t, *p.SegmentLimit)
+			require.Zero(t, *p.RateLimit)
+			require.Zero(t, *p.BurstLimit)
+			require.Zero(t, *p.RateLimitHead)
+			require.Zero(t, *p.BurstLimitHead)
+			require.Zero(t, *p.RateLimitGet)
+			require.Zero(t, *p.BurstLimitGet)
+			require.Zero(t, *p.RateLimitList)
+			require.Zero(t, *p.BurstLimitList)
+			require.Zero(t, *p.RateLimitPut)
+			require.Zero(t, *p.BurstLimitPut)
+			require.Zero(t, *p.RateLimitDelete)
+			require.Zero(t, *p.BurstLimitDelete)
+
+			keys, err := db.Console().APIKeys().GetAllNamesByProjectID(ctx, p.ID)
+			require.NoError(t, err)
+			require.Zero(t, len(keys))
+		}
+	})
 }
 
 func TestPaidTier(t *testing.T) {
@@ -2098,6 +2641,7 @@ func TestUserSettings(t *testing.T) {
 			PartnerUpgradeBanner:     false,
 			ProjectMembersPassphrase: false,
 			UploadOverwriteWarning:   false,
+			VersioningBetaBanner:     false,
 		}
 		require.Equal(t, noticeDismissal, settings.NoticeDismissal)
 
@@ -2130,6 +2674,7 @@ func TestUserSettings(t *testing.T) {
 		noticeDismissal.PartnerUpgradeBanner = true
 		noticeDismissal.ProjectMembersPassphrase = true
 		noticeDismissal.UploadOverwriteWarning = true
+		noticeDismissal.VersioningBetaBanner = true
 		settings, err = srv.SetUserSettings(userCtx, console.UpsertUserSettingsRequest{
 			SessionDuration: &sessionDurPtr,
 			OnboardingStart: &onboardingBool,
@@ -2554,7 +3099,16 @@ func TestSatelliteManagedProject(t *testing.T) {
 		Reconfigure: testplanet.Reconfigure{
 			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
 				config.Console.SatelliteManagedEncryptionEnabled = true
-				config.KeyManagement.TestMasterKey = "test-master-key"
+				config.KeyManagement.KeyInfos = kms.KeyInfos{
+					Values: map[int]kms.KeyInfo{
+						1: {
+							SecretVersion: "secretversion1", SecretChecksum: 12345,
+						},
+						2: {
+							SecretVersion: "secretversion2", SecretChecksum: 54321,
+						},
+					},
+				}
 			},
 		},
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
@@ -2577,34 +3131,209 @@ func TestSatelliteManagedProject(t *testing.T) {
 		require.NotNil(t, project.PathEncryption)
 		require.True(t, *project.PathEncryption)
 
-		encryptedPassphrase, err := projectDB.GetEncryptedPassphrase(userCtx, project.ID)
+		p1EncPass, p1EncKeyID, err := projectDB.GetEncryptedPassphrase(userCtx, project.ID)
 		require.NoError(t, err)
 		// encryptedPassphrase should be empty because project encryption is not managed by satellite
-		require.Empty(t, encryptedPassphrase)
+		require.Empty(t, p1EncPass)
+		require.Nil(t, p1EncKeyID)
 
 		config, err := srv.GetProjectConfig(userCtx, project.ID)
 		require.NoError(t, err)
 		require.Empty(t, config.Passphrase)
 
-		project, err = srv.CreateProject(userCtx, console.UpsertProjectInfo{
+		project2, err := srv.CreateProject(userCtx, console.UpsertProjectInfo{
 			Name:             "Test Project2",
 			ManagePassphrase: true,
 		})
 		require.NoError(t, err)
-		require.NotNil(t, project.PathEncryption)
+		require.NotNil(t, project2.PathEncryption)
+		require.False(t, *project2.PathEncryption)
+
+		p2EncPass, p2EncKeyID, err := projectDB.GetEncryptedPassphrase(userCtx, project2.ID)
+		require.NoError(t, err)
+		// encryptedPassphrase should not be empty because project encryption is managed by satellite
+		require.NotEmpty(t, p2EncPass)
+		require.NotNil(t, p2EncKeyID)
+
+		p2Pass, err := kmsService.DecryptPassphrase(ctx, *p2EncKeyID, p2EncPass)
+		require.NoError(t, err)
+
+		config, err = srv.GetProjectConfig(userCtx, project2.ID)
+		require.NoError(t, err)
+		require.Equal(t, string(p2Pass), config.Passphrase)
+
+		key1 := *p2EncKeyID
+		require.Equal(t, sat.Config.KeyManagement.DefaultMasterKey, key1)
+
+		// change default key
+		key2 := 2
+		sat.Config.KeyManagement.DefaultMasterKey = key2
+		require.NotEqual(t, key1, key2)
+
+		*kmsService = *kms.NewService(sat.Config.KeyManagement)
+		require.NoError(t, kmsService.Initialize(ctx))
+
+		// create new project
+		project3, err := srv.CreateProject(userCtx, console.UpsertProjectInfo{
+			Name:             "Test Project3",
+			ManagePassphrase: true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, project3.PathEncryption)
+		require.False(t, *project3.PathEncryption)
+
+		// verify new default key is used for passphrase encryption
+		p3EncPass, p3EncKeyID, err := projectDB.GetEncryptedPassphrase(userCtx, project3.ID)
+		require.NoError(t, err)
+		require.NotEmpty(t, p3EncPass)
+		require.NotNil(t, p3EncKeyID)
+		require.Equal(t, key2, *p3EncKeyID)
+
+		p3Pass, err := kmsService.DecryptPassphrase(ctx, *p3EncKeyID, p3EncPass)
+		require.NoError(t, err)
+
+		config, err = srv.GetProjectConfig(userCtx, project3.ID)
+		require.NoError(t, err)
+		require.Equal(t, string(p3Pass), config.Passphrase)
+
+		// verify previous project still returns previous default key and passphrase can be decrypted by it
+		p2EncPass, p2EncKeyID, err = projectDB.GetEncryptedPassphrase(userCtx, project2.ID)
+		require.NoError(t, err)
+		require.NotEmpty(t, p2EncPass)
+		require.NotNil(t, p2EncKeyID)
+		require.Equal(t, key1, *p2EncKeyID)
+
+		// double check decrypted project2 passphrase is the same as before
+		pass, err := kmsService.DecryptPassphrase(ctx, *p2EncKeyID, p2EncPass)
+		require.NoError(t, err)
+
+		require.Equal(t, p2Pass, pass)
+	})
+}
+
+func TestSatelliteManagedProjectWithDisabled(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: 0, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				config.Console.SatelliteManagedEncryptionEnabled = false
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		srv := sat.API.Console.Service
+		// the kms service should not be up because SatelliteManagedEncryptionEnabled is disabled
+		// and no KMS config was provided.
+		require.Nil(t, sat.API.KeyManagement.Service)
+		projectDB := sat.DB.Console().Projects()
+
+		existingUser, _, err := srv.GetUserByEmailWithUnverified(ctx, planet.Uplinks[0].User[sat.ID()].Email)
+		require.NoError(t, err)
+
+		userCtx, err := sat.UserContext(ctx, existingUser.ID)
+		require.NoError(t, err)
+
+		// creating a managed project should fail because satellite managed encryption is disabled
+		_, err = srv.CreateProject(userCtx, console.UpsertProjectInfo{
+			Name:             "Test Project",
+			ManagePassphrase: true,
+		})
+		require.True(t, errs.Is(err, console.ErrSatelliteManagedEncryption))
+
+		srv.TestToggleSatelliteManagedEncryption(true)
+		_, err = srv.CreateProject(userCtx, console.UpsertProjectInfo{
+			Name:             "Test Project",
+			ManagePassphrase: true,
+		})
+		require.True(t, errs.Is(err, console.ErrSatelliteManagedEncryption))
+		srv.TestToggleSatelliteManagedEncryption(false)
+
+		project, err := srv.CreateProject(userCtx, console.UpsertProjectInfo{
+			Name: "Test Project",
+		})
+		require.NoError(t, err)
+
+		project.PassphraseEnc = []byte("test-passphrase-enc")
+		err = projectDB.Update(userCtx, project)
+		require.NoError(t, err)
+
+		config, err := srv.GetProjectConfig(userCtx, project.ID)
+		require.NoError(t, err)
+		require.Empty(t, config.Passphrase)
+	})
+}
+
+func TestSatelliteManagedProjectWithDisabledAndConfig(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: 0, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				config.Console.SatelliteManagedEncryptionEnabled = false
+				config.KeyManagement.KeyInfos = kms.KeyInfos{
+					Values: map[int]kms.KeyInfo{
+						1: {
+							SecretVersion: "secretversion1", SecretChecksum: 12345,
+						},
+						2: {
+							SecretVersion: "secretversion2", SecretChecksum: 54321,
+						},
+					},
+				}
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		srv := sat.API.Console.Service
+		kmsService := sat.API.KeyManagement.Service
+		// the kms service should be up even though satellite managed encryption is disabled
+		// because KMS config was provided.
+		require.NotNil(t, kmsService)
+		projectDB := sat.DB.Console().Projects()
+
+		existingUser, _, err := srv.GetUserByEmailWithUnverified(ctx, planet.Uplinks[0].User[sat.ID()].Email)
+		require.NoError(t, err)
+
+		userCtx, err := sat.UserContext(ctx, existingUser.ID)
+		require.NoError(t, err)
+
+		// creating a managed project should fail because satellite managed encryption is disabled
+		_, err = srv.CreateProject(userCtx, console.UpsertProjectInfo{
+			Name:             "Test Project",
+			ManagePassphrase: true,
+		})
+		require.True(t, errs.Is(err, console.ErrSatelliteManagedEncryption))
+
+		srv.TestToggleSatelliteManagedEncryption(true)
+		project, err := srv.CreateProject(userCtx, console.UpsertProjectInfo{
+			Name:             "Test Project",
+			ManagePassphrase: true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, project)
 		require.False(t, *project.PathEncryption)
 
-		encryptedPassphrase, err = projectDB.GetEncryptedPassphrase(userCtx, project.ID)
+		srv.TestToggleSatelliteManagedEncryption(false)
+
+		encryptedPassphrase, _, err := projectDB.GetEncryptedPassphrase(userCtx, project.ID)
 		require.NoError(t, err)
 		// encryptedPassphrase should not be empty because project encryption is managed by satellite
 		require.NotEmpty(t, encryptedPassphrase)
 
-		passphrase, err := kmsService.DecryptPassphrase(ctx, encryptedPassphrase)
+		// should be able to get passphrase of already created satellite managed project
+		config, err := srv.GetProjectConfig(userCtx, project.ID)
 		require.NoError(t, err)
+		require.NotEmpty(t, config.Passphrase)
 
-		config, err = srv.GetProjectConfig(userCtx, project.ID)
+		project2, err := srv.CreateProject(userCtx, console.UpsertProjectInfo{
+			Name: "Test Project2",
+		})
 		require.NoError(t, err)
-		require.Equal(t, string(passphrase), config.Passphrase)
+		require.NotNil(t, project2)
+		require.True(t, *project2.PathEncryption)
+
+		config, err = srv.GetProjectConfig(userCtx, project2.ID)
+		require.NoError(t, err)
+		require.Empty(t, config.Passphrase)
 	})
 }
 
@@ -3051,8 +3780,8 @@ func TestServiceGenMethods(t *testing.T) {
 				info := console.UpsertProjectInfo{
 					Name:           updatedName,
 					Description:    updatedDescription,
-					StorageLimit:   updatedStorageLimit,
-					BandwidthLimit: updatedBandwidthLimit,
+					StorageLimit:   &updatedStorageLimit,
+					BandwidthLimit: &updatedBandwidthLimit,
 				}
 				updatedProject, err := s.GenUpdateProject(tt.ctx, tt.ID, info)
 				require.NoError(t, err.Err)
@@ -3063,8 +3792,8 @@ func TestServiceGenMethods(t *testing.T) {
 				}
 				require.Equal(t, info.Name, updatedProject.Name)
 				require.Equal(t, info.Description, updatedProject.Description)
-				require.Equal(t, &info.StorageLimit, updatedProject.UserSpecifiedStorageLimit)
-				require.Equal(t, &info.BandwidthLimit, updatedProject.UserSpecifiedBandwidthLimit)
+				require.Equal(t, info.StorageLimit, updatedProject.UserSpecifiedStorageLimit)
+				require.Equal(t, info.BandwidthLimit, updatedProject.UserSpecifiedBandwidthLimit)
 			})
 			t.Run("GenCreateAPIKey with "+tt.name, func(t *testing.T) {
 				request := console.CreateAPIKeyRequest{

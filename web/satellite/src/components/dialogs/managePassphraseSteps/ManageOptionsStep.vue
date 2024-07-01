@@ -4,7 +4,7 @@
 <template>
     <div class="pa-4">
         <v-sheet v-for="item in items" :key="item.next" class="ma-2">
-            <v-list-item class="pa-2" link @click="emit('optionClick', item.next)">
+            <v-list-item class="pa-2 mb-3" border link @click="emit('optionClick', item.next)">
                 <template #prepend>
                     <component :is="item.icon" width="20" height="20" class="ml-3 mr-4" />
                 </template>
@@ -12,7 +12,7 @@
                     <p class="font-weight-bold">{{ item.title }}</p>
                 </v-list-item-title>
                 <v-list-item-subtitle>
-                    <p class="text-caption text-wrap">{{ item.subtitle }}</p>
+                    <p class="text-caption text-wrap text-break">{{ item.subtitle }}</p>
                 </v-list-item-subtitle>
                 <template #append>
                     <v-icon size="24" :icon="mdiChevronRight" color="default" />

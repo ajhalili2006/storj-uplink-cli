@@ -4,7 +4,6 @@
 <template>
     <v-dialog
         v-model="model"
-        min-width="320px"
         max-width="420px"
         transition="fade-transition"
         scrollable
@@ -63,7 +62,7 @@
                     />
                 </v-window-item>
 
-                <v-window-item :value="CreateAccessStep.AccessEncryption">
+                <v-window-item v-if="!hasManagedPassphrase" :value="CreateAccessStep.AccessEncryption">
                     <access-encryption-step
                         :ref="stepInfos[CreateAccessStep.AccessEncryption].ref"
                         @select-option="newOpt => passphraseOption = newOpt"
@@ -282,6 +281,13 @@ const permissions = resettableRef<Permission[]>([]);
 const buckets = resettableRef<string[]>([]);
 const endDate = resettableRef<AccessGrantEndDate | null>(null);
 
+const projectPassphrase = computed<string>(() => projectsStore.state.selectedProjectConfig.passphrase);
+
+/**
+ * Whether this project has a satellite managed passphrase.
+ */
+const hasManagedPassphrase = computed<boolean>(() => !!projectPassphrase.value);
+
 // Select Passphrase Type
 const passphraseOption = resettableRef<PassphraseOption | null>(null);
 
@@ -305,7 +311,7 @@ const worker = ref<Worker | null>(null);
 const stepInfos: Record<CreateAccessStep, StepInfo> = {
     [CreateAccessStep.CreateNewAccess]: new StepInfo(
         null,
-        () => (accessTypes.value.includes(AccessType.S3) && !userStore.noticeDismissal.serverSideEncryption)
+        () => (accessTypes.value.includes(AccessType.S3) && !userStore.noticeDismissal.serverSideEncryption && !hasManagedPassphrase.value)
             ? CreateAccessStep.EncryptionInfo
             : CreateAccessStep.ChoosePermission,
     ),
@@ -314,10 +320,16 @@ const stepInfos: Record<CreateAccessStep, StepInfo> = {
         CreateAccessStep.ChoosePermission,
     ),
     [CreateAccessStep.ChoosePermission]: new StepInfo(
-        () => (accessTypes.value.includes(AccessType.S3) && !userStore.noticeDismissal.serverSideEncryption)
+        () => (accessTypes.value.includes(AccessType.S3) && !userStore.noticeDismissal.serverSideEncryption && !hasManagedPassphrase.value)
             ? CreateAccessStep.EncryptionInfo
             : CreateAccessStep.CreateNewAccess,
-        () => accessTypes.value.includes(AccessType.APIKey) ? CreateAccessStep.ConfirmDetails : CreateAccessStep.AccessEncryption,
+        () => {
+            if (accessTypes.value.includes(AccessType.APIKey) || hasManagedPassphrase.value) {
+                return CreateAccessStep.ConfirmDetails;
+            }
+
+            return CreateAccessStep.AccessEncryption;
+        },
     ),
     [CreateAccessStep.AccessEncryption]: new StepInfo(
         CreateAccessStep.ChoosePermission,
@@ -343,7 +355,7 @@ const stepInfos: Record<CreateAccessStep, StepInfo> = {
 
     [CreateAccessStep.ConfirmDetails]: new StepInfo(
         () => {
-            if (accessTypes.value.includes(AccessType.APIKey)) {
+            if (accessTypes.value.includes(AccessType.APIKey) || hasManagedPassphrase.value) {
                 return CreateAccessStep.ChoosePermission;
             }
 
@@ -528,6 +540,10 @@ async function createAccessGrant(): Promise<void> {
     const satelliteNodeURL = configStore.state.config.satelliteNodeURL;
 
     const salt = await projectsStore.getProjectSalt(projectsStore.state.selectedProject.id);
+
+    if (hasManagedPassphrase.value) {
+        passphrase.value = projectPassphrase.value;
+    }
 
     if (!passphrase.value) {
         throw new Error('Passphrase can\'t be empty');

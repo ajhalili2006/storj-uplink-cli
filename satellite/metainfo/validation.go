@@ -35,7 +35,8 @@ import (
 const encryptedKeySize = 48
 
 var (
-	ipRegexp = regexp.MustCompile(`^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$`)
+	ipRegexp           = regexp.MustCompile(`^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$`)
+	unauthorizedErrMsg = "Unauthorized API credentials"
 )
 
 var ek = eventkit.Package()
@@ -55,10 +56,10 @@ func getAPIKey(ctx context.Context, header *pb.RequestHeader) (key *macaroon.API
 }
 
 // validateAuth validates things like API key, user permissions and rate limit and always returns valid rpc error.
-func (endpoint *Endpoint) validateAuth(ctx context.Context, header *pb.RequestHeader, action macaroon.Action) (_ *console.APIKeyInfo, err error) {
+func (endpoint *Endpoint) validateAuth(ctx context.Context, header *pb.RequestHeader, action macaroon.Action, rateLimitKind console.LimitKind) (_ *console.APIKeyInfo, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	key, keyInfo, err := endpoint.validateBasic(ctx, header)
+	key, keyInfo, err := endpoint.validateBasic(ctx, header, rateLimitKind)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +67,7 @@ func (endpoint *Endpoint) validateAuth(ctx context.Context, header *pb.RequestHe
 	err = key.Check(ctx, keyInfo.Secret, keyInfo.Version, action, endpoint.revocations)
 	if err != nil {
 		endpoint.log.Debug("unauthorized request", zap.Error(err))
-		return nil, rpcstatus.Error(rpcstatus.PermissionDenied, "Unauthorized API credentials")
+		return nil, rpcstatus.Error(rpcstatus.PermissionDenied, unauthorizedErrMsg)
 	}
 
 	return keyInfo, nil
@@ -84,7 +85,7 @@ type VerifyPermission struct {
 // required (not optional) permission that the check fails for. There must be at
 // least one required (not optional) permission. In case all permissions are
 // optional, it will return an error. It always returns valid RPC errors.
-func (endpoint *Endpoint) ValidateAuthN(ctx context.Context, header *pb.RequestHeader, permissions ...VerifyPermission) (_ *console.APIKeyInfo, err error) {
+func (endpoint *Endpoint) ValidateAuthN(ctx context.Context, header *pb.RequestHeader, rateLimitKind console.LimitKind, permissions ...VerifyPermission) (_ *console.APIKeyInfo, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	allOptional := true
@@ -100,7 +101,7 @@ func (endpoint *Endpoint) ValidateAuthN(ctx context.Context, header *pb.RequestH
 		return nil, rpcstatus.Error(rpcstatus.Internal, "All permissions are optional")
 	}
 
-	key, keyInfo, err := endpoint.validateBasic(ctx, header)
+	key, keyInfo, err := endpoint.validateBasic(ctx, header, rateLimitKind)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +113,7 @@ func (endpoint *Endpoint) ValidateAuthN(ctx context.Context, header *pb.RequestH
 		}
 		if err != nil && !p.Optional {
 			endpoint.log.Debug("unauthorized request", zap.Error(err))
-			return nil, rpcstatus.Error(rpcstatus.PermissionDenied, "Unauthorized API credentials")
+			return nil, rpcstatus.Error(rpcstatus.PermissionDenied, unauthorizedErrMsg)
 		}
 	}
 
@@ -122,10 +123,10 @@ func (endpoint *Endpoint) ValidateAuthN(ctx context.Context, header *pb.RequestH
 // validateAuthAny validates things like API keys, rate limit and user permissions.
 // At least one of the Action from actions must be permitted to return successfully.
 // It always returns valid RPC errors.
-func (endpoint *Endpoint) validateAuthAny(ctx context.Context, header *pb.RequestHeader, actions ...macaroon.Action) (_ *console.APIKeyInfo, err error) {
+func (endpoint *Endpoint) validateAuthAny(ctx context.Context, header *pb.RequestHeader, rateLimitKind console.LimitKind, actions ...macaroon.Action) (_ *console.APIKeyInfo, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	key, keyInfo, err := endpoint.validateBasic(ctx, header)
+	key, keyInfo, err := endpoint.validateBasic(ctx, header, rateLimitKind)
 	if err != nil {
 		return nil, err
 	}
@@ -144,10 +145,10 @@ func (endpoint *Endpoint) validateAuthAny(ctx context.Context, header *pb.Reques
 	}
 
 	endpoint.log.Debug("unauthorized request", zap.Error(combinedErrs))
-	return nil, rpcstatus.Error(rpcstatus.PermissionDenied, "Unauthorized API credentials")
+	return nil, rpcstatus.Error(rpcstatus.PermissionDenied, unauthorizedErrMsg)
 }
 
-func (endpoint *Endpoint) validateBasic(ctx context.Context, header *pb.RequestHeader) (_ *macaroon.APIKey, _ *console.APIKeyInfo, err error) {
+func (endpoint *Endpoint) validateBasic(ctx context.Context, header *pb.RequestHeader, rateKind console.LimitKind) (_ *macaroon.APIKey, _ *console.APIKeyInfo, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	key, err := getAPIKey(ctx, header)
@@ -159,7 +160,7 @@ func (endpoint *Endpoint) validateBasic(ctx context.Context, header *pb.RequestH
 	keyInfo, err := endpoint.apiKeys.GetByHead(ctx, key.Head())
 	if err != nil {
 		endpoint.log.Debug("unauthorized request", zap.Error(err))
-		return nil, nil, rpcstatus.Error(rpcstatus.PermissionDenied, "Unauthorized API credentials")
+		return nil, nil, rpcstatus.Error(rpcstatus.PermissionDenied, unauthorizedErrMsg)
 	}
 
 	userAgent := ""
@@ -172,7 +173,7 @@ func (endpoint *Endpoint) validateBasic(ctx context.Context, header *pb.RequestH
 		eventkit.String("partner", string(keyInfo.UserAgent)),
 	)
 
-	if err = endpoint.checkRate(ctx, keyInfo); err != nil {
+	if err = endpoint.checkRate(ctx, keyInfo, rateKind); err != nil {
 		endpoint.log.Debug("rate check failed", zap.Error(err))
 		return nil, nil, err
 	}
@@ -182,7 +183,7 @@ func (endpoint *Endpoint) validateBasic(ctx context.Context, header *pb.RequestH
 
 func (endpoint *Endpoint) validateRevoke(ctx context.Context, header *pb.RequestHeader, macToRevoke *macaroon.Macaroon) (_ *console.APIKeyInfo, err error) {
 	defer mon.Task()(&ctx)(&err)
-	key, keyInfo, err := endpoint.validateBasic(ctx, header)
+	key, keyInfo, err := endpoint.validateBasic(ctx, header, console.RateLimitPut)
 	if err != nil {
 		return nil, err
 	}
@@ -206,24 +207,60 @@ func (endpoint *Endpoint) validateRevoke(ctx context.Context, header *pb.Request
 	return nil, rpcstatus.Error(rpcstatus.PermissionDenied, "Unauthorized attempt to revoke macaroon")
 }
 
-func (endpoint *Endpoint) checkRate(ctx context.Context, apiKeyInfo *console.APIKeyInfo) (err error) {
+// checkRate validates whether the rate limiter has been hit for a particular project and operation.
+// If the project has an operation-specific rate limit for the operation in question, that is used
+// Otherwise, if the project has a basic "project-level" rate limit, that is used
+// Otherwise, the global rate limit configs on the satellite are used.
+func (endpoint *Endpoint) checkRate(ctx context.Context, apiKeyInfo *console.APIKeyInfo, rateKind console.LimitKind) (err error) {
 	defer mon.Task()(&ctx)(&err)
 	if !endpoint.config.RateLimiter.Enabled {
 		return nil
 	}
-	limiter, err := endpoint.limiterCache.Get(ctx, apiKeyInfo.ProjectID.String(), func() (*rate.Limiter, error) {
-		rateLimit := rate.Limit(endpoint.config.RateLimiter.Rate)
-		burstLimit := int(endpoint.config.RateLimiter.Rate)
 
-		if apiKeyInfo.ProjectRateLimit != nil {
-			rateLimit = rate.Limit(*apiKeyInfo.ProjectRateLimit)
-			burstLimit = *apiKeyInfo.ProjectRateLimit
+	var (
+		rateLimit  rate.Limit
+		burstLimit int
+		limiterKey = apiKeyInfo.ProjectID.String()
+	)
+	// checkSetRate is a helper function for validating nullable rate/burst values, and overriding `rateLimit` and `burstLimit` if needed
+	checkSetRate := func(newRate, newBurst *int, keySuffix string) {
+		overridden := false
+		if newRate != nil {
+			rateLimit = rate.Limit(*newRate)
+			burstLimit = *newRate
+			overridden = true
 		}
-		// use the explicitly set burst value if it's defined
-		if apiKeyInfo.ProjectBurstLimit != nil {
-			burstLimit = *apiKeyInfo.ProjectBurstLimit
+		if newBurst != nil {
+			burstLimit = *newBurst
+			overridden = true
 		}
+		if overridden {
+			// only use suffix in rate limiter key if override occurs
+			limiterKey = apiKeyInfo.ProjectID.String() + keySuffix
+		}
+	}
 
+	// set default value to global config, overridden by project.rate_limit and project.burst_limit if provided
+	rateLimit = rate.Limit(endpoint.config.RateLimiter.Rate)
+	burstLimit = int(endpoint.config.RateLimiter.Rate)
+	checkSetRate(apiKeyInfo.ProjectRateLimit, apiKeyInfo.ProjectBurstLimit, "")
+
+	// update rate limit values if user has custom rate limits for the provided operation
+	switch rateKind {
+	case console.RateLimitHead:
+		checkSetRate(apiKeyInfo.ProjectRateLimitHead, apiKeyInfo.ProjectBurstLimitHead, "-head")
+	case console.RateLimitGet:
+		checkSetRate(apiKeyInfo.ProjectRateLimitGet, apiKeyInfo.ProjectBurstLimitGet, "-get")
+	case console.RateLimitPut:
+		checkSetRate(apiKeyInfo.ProjectRateLimitPut, apiKeyInfo.ProjectBurstLimitPut, "-put")
+	case console.RateLimitList:
+		checkSetRate(apiKeyInfo.ProjectRateLimitList, apiKeyInfo.ProjectBurstLimitList, "-list")
+	case console.RateLimitDelete:
+		checkSetRate(apiKeyInfo.ProjectRateLimitDelete, apiKeyInfo.ProjectBurstLimitDelete, "-delete")
+	default: // invalid rate limit kind passed in, but safe to proceed with global or project defaults
+	}
+
+	limiter, err := endpoint.limiterCache.Get(ctx, limiterKey, func() (*rate.Limiter, error) {
 		return rate.NewLimiter(rateLimit, burstLimit), nil
 	})
 	if err != nil {
@@ -237,7 +274,8 @@ func (endpoint *Endpoint) checkRate(ctx context.Context, apiKeyInfo *console.API
 		endpoint.log.Warn("too many requests for project",
 			zap.Stringer("Project ID", apiKeyInfo.ProjectID),
 			zap.Float64("rate limit", float64(limiter.Limit())),
-			zap.Float64("burst limit", float64(limiter.Burst())))
+			zap.Float64("burst limit", float64(limiter.Burst())),
+			zap.Int("rate limit kind", int(rateKind)))
 
 		mon.Event("metainfo_rate_limit_exceeded") //mon:locked
 

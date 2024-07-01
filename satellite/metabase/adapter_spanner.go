@@ -6,7 +6,7 @@ package metabase
 import (
 	"context"
 
-	"github.com/storj/exp-spanner"
+	"cloud.google.com/go/spanner"
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 )
@@ -48,6 +48,11 @@ func (s *SpannerAdapter) Close() error {
 // Name returns the name of the adapter.
 func (s *SpannerAdapter) Name() string {
 	return "spanner"
+}
+
+// UnderlyingDB returns a handle to the underlying DB.
+func (s *SpannerAdapter) UnderlyingDB() *spanner.Client {
+	return s.client
 }
 
 var _ Adapter = &SpannerAdapter{}

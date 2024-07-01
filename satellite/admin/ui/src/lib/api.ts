@@ -277,39 +277,91 @@ export class Admin {
 			},
 			{
 				name: 'update project limits',
-				desc: 'Update the limits of a specific project. Only the no blank fields are updated. Fields with the 0 value are set to 0, which is not the default value. The fields that accept -1 set the value to null, which is the value that indicate the satellite to apply the configured defaults',
+				desc: 'Update the limits of a specific project. Only the non-blank fields are updated. Fields with the 0 value are set to 0, which is not the default value. The fields that accept -1 set the value to null, which is the value that indicate the satellite to apply the configured defaults',
 				params: [
 					['Project ID', new InputText('text', true)],
 					['Storage (in bytes or notations like 1GB, 2tb)', new InputText('text', false)],
 					['Bandwidth (in bytes or notations like 1GB, 2tb)', new InputText('text', false)],
-					['Rate: requests per second (accepts -1)', new InputText('number', false)],
 					['Buckets: maximum number (accepts -1)', new InputText('number', false)],
+					['Segments (maximum number)', new InputText('number', false)],
+					['Rate: requests per second (accepts -1)', new InputText('number', false)],
 					['Burst: max concurrent requests (accepts -1)', new InputText('number', false)],
-					['Segments (maximum number)', new InputText('number', false)]
+					['Rate (head): head requests per second (accepts -1)', new InputText('number', false)],
+					[
+						'Burst (head): max concurrent head requests (accepts -1)',
+						new InputText('number', false)
+					],
+					['Rate (get): get requests per second (accepts -1)', new InputText('number', false)],
+					['Burst (get): max concurrent get requests (accepts -1)', new InputText('number', false)],
+					['Rate (put): put requests per second (accepts -1)', new InputText('number', false)],
+					['Burst (put): max concurrent put requests (accepts -1)', new InputText('number', false)],
+					['Rate (list): list requests per second (accepts -1)', new InputText('number', false)],
+					[
+						'Burst (list): max concurrent list requests (accepts -1)',
+						new InputText('number', false)
+					],
+					[
+						'Rate (delete): delete requests per second (accepts -1)',
+						new InputText('number', false)
+					],
+					[
+						'Burst (delete): max concurrent delete requests (accepts -1)',
+						new InputText('number', false)
+					]
 				],
 				func: async (
 					projectId: string,
 					usage: string,
 					bandwidth: string,
-					rate: number,
 					buckets: number,
+					segments: number,
+					rate: number,
 					burst: number,
-					segments: number
+					rateHead: number,
+					burstHead: number,
+					rateGet: number,
+					burstGet: number,
+					ratePut: number,
+					burstPut: number,
+					rateList: number,
+					burstList: number,
+					rateDelete: number,
+					burstDelete: number
 				): Promise<null> => {
 					usage = this.emptyToUndefined(usage);
 					bandwidth = this.emptyToUndefined(bandwidth);
-					rate = this.nullToUndefined(rate);
 					buckets = this.nullToUndefined(buckets);
-					burst = this.nullToUndefined(burst);
 					segments = this.nullToUndefined(segments);
+					rate = this.nullToUndefined(rate);
+					burst = this.nullToUndefined(burst);
+					rateHead = this.nullToUndefined(rateHead);
+					burstHead = this.nullToUndefined(burstHead);
+					rateGet = this.nullToUndefined(rateGet);
+					burstGet = this.nullToUndefined(burstGet);
+					ratePut = this.nullToUndefined(ratePut);
+					burstPut = this.nullToUndefined(burstPut);
+					rateList = this.nullToUndefined(rateList);
+					burstList = this.nullToUndefined(burstList);
+					rateDelete = this.nullToUndefined(rateDelete);
+					burstDelete = this.nullToUndefined(burstDelete);
 
 					const query = this.urlQueryFromObject({
 						usage,
 						bandwidth,
-						rate,
 						buckets,
+						segments,
+						rate,
 						burst,
-						segments
+						rateHead,
+						burstHead,
+						rateGet,
+						burstGet,
+						ratePut,
+						burstPut,
+						rateList,
+						burstList,
+						rateDelete,
+						burstDelete
 					});
 
 					if (query === '') {
@@ -367,7 +419,20 @@ export class Admin {
 					['Page', new InputText('number', true)]
 				],
 				func: async (limit: number, page: number): Promise<Record<string, unknown>> => {
-					return this.fetch('GET', `users-pending-deletion?limit=${limit}&page=${page}`);
+					return this.fetch('GET', `users/deletion/pending?limit=${limit}&page=${page}`);
+				}
+			},
+			{
+				name: 'get users requested for deletion',
+				desc: 'Get a CSV of user account emails which were requested for deletion by users themselves',
+				params: [
+					['status updated before (date string i.e. YYYY/MM/DD)', new InputText('text', true)]
+				],
+				func: async (date: string): Promise<void> => {
+					return this.download(
+						`users/deletion/requested-by-user?before=${this.toISOStringWithLocalTimezone(date)}`,
+						'users-requested-for-deletion.csv'
+					);
 				}
 			},
 			{
@@ -676,6 +741,39 @@ Blank fields will not be updated.`,
 		}
 
 		return null;
+	}
+
+	protected async download(path: string, fileName: string): Promise<void> {
+		const url = this.apiURL(path, '');
+		const headers = new window.Headers();
+
+		if (this.authToken) {
+			headers.set('Authorization', this.authToken);
+		}
+
+		const response = await window.fetch(url, { method: 'GET', headers });
+		if (!response.ok) {
+			let body: Record<string, unknown>;
+			if (response.headers.get('Content-Type') === 'application/json') {
+				body = await response.json();
+			}
+
+			throw new APIError('server response error', response.status, body);
+		}
+
+		const blob = await response.blob();
+
+		this.downloadBlob(blob, fileName);
+	}
+
+	protected downloadBlob(blob: Blob, fileName: string): void {
+		const elem = window.document.createElement('a');
+		const link = window.URL.createObjectURL(blob);
+
+		elem.href = link;
+		elem.download = fileName;
+		elem.click();
+		window.URL.revokeObjectURL(link);
 	}
 
 	protected toISOStringWithLocalTimezone(dateInput: string): string {
