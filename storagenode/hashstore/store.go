@@ -25,6 +25,7 @@ import (
 	"storj.io/common/context2"
 	"storj.io/common/memory"
 	"storj.io/drpc/drpcsignal"
+	"storj.io/storj/storagenode/hashstore/platform"
 )
 
 var (
@@ -138,7 +139,7 @@ func NewStore(ctx context.Context, logsPath string, tablePath string, log *zap.L
 		if err != nil {
 			return nil, Error.New("unable to create lock file: %w", err)
 		}
-		if err := optimisticFlock(s.lock); err != nil {
+		if err := platform.Flock(s.lock); err != nil {
 			return nil, Error.New("unable to flock: %w", err)
 		}
 	}
@@ -372,7 +373,7 @@ func (s *Store) createLogFile(ttl uint32) (*logFile, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, Error.Wrap(err)
 	}
-	fh, err := createFile(path)
+	fh, err := platform.CreateFile(path)
 	if err != nil {
 		return nil, Error.Wrap(err)
 	}
@@ -928,9 +929,9 @@ func (s *Store) compactOnce(
 		return false, Error.Wrap(err)
 	}
 
-	// only expect ordered if both tables have the same key ordering.
+	// only expect ordered if both tables have the same key ordering and table kind.
 	flush := func() error { return nil }
-	if ntbl.Header().HashKey == s.tbl.Header().HashKey {
+	if ntbl.Header().HashKey == s.tbl.Header().HashKey && ntbl.Header().Kind == s.tbl.Header().Kind {
 		var done func()
 		flush, done, err = ntbl.ExpectOrdered(ctx)
 		if err != nil {
@@ -1107,7 +1108,9 @@ func (s *Store) compactOnce(
 	return len(rewriteCandidates) == len(rewrite), nil
 }
 
-func (s *Store) rewriteRecord(ctx context.Context, rec Record, rewriteCandidates map[uint64]bool) (Record, error) {
+func (s *Store) rewriteRecord(ctx context.Context, rec Record, rewriteCandidates map[uint64]bool) (_ Record, err error) {
+	defer mon.Task()(&ctx)(&err)
+
 	r, err := s.readerForRecord(ctx, rec)
 	if err != nil {
 		return rec, Error.Wrap(err)
