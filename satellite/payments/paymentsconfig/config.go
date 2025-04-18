@@ -4,8 +4,8 @@
 package paymentsconfig
 
 import (
+	"encoding/json"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -13,7 +13,9 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/zeebo/errs"
 
+	"storj.io/common/storj"
 	"storj.io/common/useragent"
+	"storj.io/storj/satellite/nodeselection"
 	"storj.io/storj/satellite/payments"
 	"storj.io/storj/satellite/payments/billing"
 	"storj.io/storj/satellite/payments/storjscan"
@@ -34,9 +36,9 @@ type Config struct {
 	UsagePrice         ProjectUsagePrice
 
 	// TODO: if we decide to put default product in here and change away from overrides, change the type name.
-	Products                        ProductPriceOverrides       `help:"semicolon-separated list of products and their product IDs and price structures in the format: product:productID,storage,egress,segment,egress_discount_ratio. The egress discount ratio is the ratio of free egress per unit-month of storage"`
-	PlacementPriceOverrides         PlacementProductMap         `help:"semicolon-separated list of placement price overrides in the format: placement:product. Multiple placements may be mapped to a single product like so: p0,p1:product. Products must be defined by the --payments.products config, or the satellite will not start."`
-	PartnersPlacementPriceOverrides PartnersPlacementProductMap `help:"semicolon-separated list of partners to placement price overrides in the format: partner0[placement0:product0;placement1,placement2:product1];partner1[etc...] If a partner uses a placement not defined for them in this config, they will be charged according to --payments.placement-price-overrides."`
+	Products                        ProductPriceOverrides       `help:"a JSON mapping of non-zero product IDs to their names and price structures in the format: {\"productID\": {\"name\": \"...\", \"storage\": \"...\", \"egress\": \"...\", \"segment\": \"...\", \"egress_discount_ratio\": \"...\"}}. The egress discount ratio is the ratio of free egress per unit-month of storage"`
+	PlacementPriceOverrides         PlacementProductMap         `help:"a JSON mapping of product ID to placements in the format: {productID0:[placement0],productID1:[placement1,placement2]}. Products must be defined by the --payments.products config, or the satellite will not start."`
+	PartnersPlacementPriceOverrides PartnersPlacementProductMap `help:"a JSON mapping of partners to a mapping of product ID to placements in the format: {\"partner0\":{productID0:[placement0],productID1:[placement1,placement2]}}. If a partner uses a placement not defined for them in this config, they will be charged according to --payments.placement-price-overrides."`
 
 	BonusRate           int64          `help:"amount of percents that user will earn as bonus credits by depositing in STORJ tokens" default:"10"`
 	UsagePriceOverrides PriceOverrides `help:"semicolon-separated usage price overrides in the format partner:storage,egress,segment,egress_discount_ratio. The egress discount ratio is the ratio of free egress per unit-month of storage"`
@@ -170,115 +172,115 @@ func (p PriceOverrides) ToModels() (map[string]payments.ProjectUsagePriceModel, 
 
 // ProductUsagePrice represents the product ID and usage price for a product.
 type ProductUsagePrice struct {
-	ProductID int32
+	Name string
 	ProjectUsagePrice
 }
 
 // ProductPriceOverrides represents a mapping between a string and product price overrides.
 type ProductPriceOverrides struct {
-	overrideMap map[string]ProductUsagePrice
+	overrideMap map[int32]ProductUsagePrice
 }
 
 // Type returns the type of the pflag.Value.
 func (ProductPriceOverrides) Type() string { return "paymentsconfig.ProductPriceOverrides" }
 
-// String returns the string representation of the price overrides.
-func (p *ProductPriceOverrides) String() string {
-	if p == nil {
-		return ""
-	}
-	var s strings.Builder
-	left := len(p.overrideMap)
-	for key, prices := range p.overrideMap {
-		egressDiscount := strconv.FormatFloat(prices.EgressDiscountRatio, 'f', -1, 64)
-		s.WriteString(fmt.Sprintf("%s:%d,%s,%s,%s,%s", key, prices.ProductID, prices.StorageTB, prices.EgressTB, prices.Segment, egressDiscount))
-		left--
-		if left > 0 {
-			s.WriteRune(';')
-		}
-	}
-	return s.String()
+type productUsagePriceJson struct {
+	Name                string `json:"name"`
+	Storage             string `json:"storage"`
+	Egress              string `json:"egress"`
+	Segment             string `json:"segment"`
+	EgressDiscountRatio string `json:"egress_discount_ratio"`
 }
 
-// Set sets the list of price overrides to the parsed string.
+// String returns the JSON string representation of the price overrides.
+func (p *ProductPriceOverrides) String() string {
+	if p == nil || len(p.overrideMap) == 0 {
+		return ""
+	}
+
+	pricesConv := make(map[int32]productUsagePriceJson)
+	for i, price := range p.overrideMap {
+		pricesConv[i] = productUsagePriceJson{
+			Name:                price.Name,
+			Storage:             price.StorageTB,
+			Egress:              price.EgressTB,
+			Segment:             price.Segment,
+			EgressDiscountRatio: fmt.Sprintf("%.2f", price.EgressDiscountRatio),
+		}
+	}
+	prices, err := json.Marshal(pricesConv)
+	if err != nil {
+		return ""
+	}
+
+	return string(prices)
+}
+
+// Set sets the list of price overrides to the JSON string.
 func (p *ProductPriceOverrides) Set(s string) error {
-	overrideMap := make(map[string]ProductUsagePrice)
-	productIDsSeen := make(map[int32]struct{})
-	for _, overrideStr := range strings.Split(s, ";") {
-		if overrideStr == "" {
-			continue
-		}
+	if s == "" {
+		return nil
+	}
 
-		info := strings.Split(overrideStr, ":")
-		if len(info) != 2 {
-			return Error.New("Invalid price override (expected format key:productID,storage,egress,segment,egress_discount_ratio, got %s)", overrideStr)
+	pricesConv := make(map[int32]productUsagePriceJson)
+	err := json.Unmarshal([]byte(s), &pricesConv)
+	if err != nil {
+		return err
+	}
+	prices := make(map[int32]ProductUsagePrice)
+	for id, price := range pricesConv {
+		if id == 0 {
+			return Error.New("Product ID must not be 0")
 		}
-
-		key := strings.TrimSpace(info[0])
-		if len(key) == 0 {
-			return Error.New("Price override key must not be empty")
+		if price.Name == "" {
+			return Error.New("Product Name must not be empty")
 		}
-
-		valuesStr := info[1]
-		values := strings.Split(valuesStr, ",")
-		if len(values) != 5 {
-			return Error.New("Invalid values (expected format productID,storage,egress,segment,egress_discount_ratio, got %s)", valuesStr)
-		}
-
-		productID64, err := strconv.ParseInt(values[0], 10, 32)
+		egressDiscount, err := strconv.ParseFloat(price.EgressDiscountRatio, 64)
 		if err != nil {
-			return Error.New("Invalid product ID '%s' (%s)", values[0], err)
+			return Error.New("Invalid egress discount ratio '%s' (%s)", price.EgressDiscountRatio, err)
 		}
-		productID := int32(productID64)
-		if _, ok := productIDsSeen[productID]; ok {
-			return Error.New("Product ID mapped multiple times. Check the config for (%d) and ensure only one product has this product ID.", productID)
-		}
-		productIDsSeen[productID] = struct{}{}
-
-		for i := 1; i < 4; i++ {
-			if _, err := decimal.NewFromString(values[i]); err != nil {
-				return Error.New("Invalid price '%s' (%s)", values[i], err)
-			}
-		}
-
-		egressDiscount, err := strconv.ParseFloat(values[4], 64)
-		if err != nil {
-			return Error.New("Invalid egress discount ratio '%s' (%s)", values[4], err)
-		}
-
-		overrideMap[info[0]] = ProductUsagePrice{
-			ProductID: productID,
+		prices[id] = ProductUsagePrice{
+			Name: price.Name,
 			ProjectUsagePrice: ProjectUsagePrice{
-				StorageTB:           values[1],
-				EgressTB:            values[2],
-				Segment:             values[3],
+				StorageTB:           price.Storage,
+				EgressTB:            price.Egress,
+				Segment:             price.Segment,
 				EgressDiscountRatio: egressDiscount,
 			},
 		}
 	}
-	p.overrideMap = overrideMap
+	p.overrideMap = prices
 	return nil
 }
 
-// SetMap sets the internal mapping between a string and usage prices.
-func (p *ProductPriceOverrides) SetMap(overrides map[string]ProductUsagePrice) {
+// SetMap sets the internal mapping between a product ID and usage prices.
+func (p *ProductPriceOverrides) SetMap(overrides map[int32]ProductUsagePrice) {
 	p.overrideMap = overrides
 }
 
 // ToModels returns the price overrides represented as a mapping between a string and product usage price models.
-func (p ProductPriceOverrides) ToModels() (map[string]payments.ProductUsagePriceModel, error) {
-	models := make(map[string]payments.ProductUsagePriceModel)
+func (p ProductPriceOverrides) ToModels() (map[int32]payments.ProductUsagePriceModel, error) {
+	models := make(map[int32]payments.ProductUsagePriceModel)
 	for key, prices := range p.overrideMap {
 		projectUsageModel, err := prices.ToModel()
 		if err != nil {
 			return nil, err
 		}
 		models[key] = payments.ProductUsagePriceModel{
-			ProductID:              prices.ProductID,
+			ProductID:              key,
 			ProjectUsagePriceModel: projectUsageModel,
 		}
 	}
 	return models, nil
+}
+
+// Get returns the product usage price for the given product ID.
+func (p *ProductPriceOverrides) Get(id int32) (prices ProductUsagePrice, ok bool) {
+	if p == nil {
+		return ProductUsagePrice{}, false
+	}
+	prices, ok = p.overrideMap[id]
+	return prices, ok
 }
 
 // Ensure that PlacementProductMap implements pflag.Value.
@@ -286,82 +288,56 @@ var _ pflag.Value = (*PlacementProductMap)(nil)
 
 // PlacementProductMap maps placements to products.
 type PlacementProductMap struct {
-	placementProductMap map[int]string
+	placementProductMap map[int]int32
 }
 
 // SetMap sets the internal mapping between placements and products.
-func (p *PlacementProductMap) SetMap(placementProductMap map[int]string) {
+func (p *PlacementProductMap) SetMap(placementProductMap map[int]int32) {
 	p.placementProductMap = placementProductMap
 }
 
-// ToMap flattens the placement to product map typed as payments.PlacementProductMap.
-func (p *PlacementProductMap) ToMap() payments.PlacementProductMap {
+// ToMap flattens the placement to product map typed as payments.PlacementProductIdMap.
+func (p *PlacementProductMap) ToMap() payments.PlacementProductIdMap {
 	return p.placementProductMap
 }
 
 // Type returns the type of the pflag.Value.
-func (PlacementProductMap) Type() string { return "paymentsconfig.PlacementProductMap" }
+func (PlacementProductMap) Type() string { return "paymentsconfig.PlacementProductIdMap" }
 
-// String returns the string representation of the placements to product map. Placements of a single key-value pair
-// are sorted and the greater key-value strings themselves are sorted in ascending order.
+// String returns the JSON string representation of the placements to product map.
 func (p *PlacementProductMap) String() string {
-	if p == nil {
+	if p == nil || len(p.placementProductMap) == 0 {
 		return ""
 	}
 
-	productToPlacements := make(map[string][]string)
+	productToPlacements := make(map[int32][]int)
 	for placement, product := range p.placementProductMap {
-		placements := productToPlacements[product]
-		productToPlacements[product] = append(placements, strconv.Itoa(placement))
+		productToPlacements[product] = append(productToPlacements[product], placement)
 	}
 
-	var kvs []string
-	for product, placements := range productToPlacements {
-		sort.Strings(placements)
-		kvs = append(kvs, fmt.Sprintf("%s:%s", strings.Join(placements, ","), product))
+	data, err := json.Marshal(productToPlacements)
+	if err != nil {
+		return ""
 	}
-
-	sort.Strings(kvs)
-
-	return strings.Join(kvs, ";")
+	return string(data)
 }
 
-// Set sets the placement to product mappings to the parsed string.
+// Set sets the placement to product mappings to the JSON string.
 func (p *PlacementProductMap) Set(s string) error {
-	placementProductMap := make(map[int]string)
-	productsSeen := make(map[string]struct{})
-	for _, placementsToProductStr := range strings.Split(s, ";") {
-		if placementsToProductStr == "" {
-			continue
-		}
+	if s == "" {
+		return nil
+	}
 
-		info := strings.Split(placementsToProductStr, ":")
-		if len(info) != 2 {
-			return Error.New("Invalid placements to product string (expected format p0,p1:product, got %s)", placementsToProductStr)
-		}
+	mapping := make(map[int32][]int)
+	err := json.Unmarshal([]byte(s), &mapping)
+	if err != nil {
+		return err
+	}
 
-		placementsStr := strings.TrimSpace(info[0])
-		placements := strings.Split(placementsStr, ",")
-		if len(placements) == 0 {
-			return Error.New("Placements must not be empty")
-		}
-
-		product := info[1]
-
-		if _, ok := productsSeen[product]; ok {
-			return Error.New("Product mapped multiple times. Check the config for (%s) and ensure only a single key-value pair exists per product.", product)
-		}
-		productsSeen[product] = struct{}{}
-
-		for _, p := range placements {
-			pInt, err := strconv.Atoi(p)
-			if err != nil {
-				return Error.New("Placement must be an int: %w", err)
-			}
-			if _, ok := placementProductMap[pInt]; ok {
-				return Error.New("Placements cannot be mapped to multiple products. Check the config for placement %d", pInt)
-			}
-			placementProductMap[pInt] = product
+	placementProductMap := make(map[int]int32)
+	for productID, placements := range mapping {
+		for _, placement := range placements {
+			placementProductMap[placement] = productID
 		}
 	}
 	p.placementProductMap = placementProductMap
@@ -394,49 +370,48 @@ func (p *PartnersPlacementProductMap) ToMap() payments.PartnersPlacementProductM
 // Type returns the type of the pflag.Value.
 func (PartnersPlacementProductMap) Type() string { return "paymentsconfig.PartnersPlacementProductMap" }
 
-// String returns the string representation of the partners to placements to product map. Partner configs are
-// sorted in ascending order by partner name.
+// String returns the JSON string representation of the partners to placements to product map.
 func (p *PartnersPlacementProductMap) String() string {
-	if p == nil {
+	if p == nil || len(p.partnerPlacementProductMap) == 0 {
 		return ""
 	}
 
-	var kvs []string
-	for partner, placementProductMap := range p.partnerPlacementProductMap {
-		kvs = append(kvs, fmt.Sprintf("%s[%s]", partner, placementProductMap.String()))
+	mapping := make(map[string]map[int32][]int)
+	for partner, placementProduct := range p.partnerPlacementProductMap {
+		productPlacements := make(map[int32][]int)
+		for placement, product := range placementProduct.placementProductMap {
+			productPlacements[product] = append(productPlacements[product], placement)
+		}
+		mapping[partner] = productPlacements
 	}
 
-	sort.Strings(kvs)
-
-	return strings.Join(kvs, ";")
+	data, err := json.Marshal(mapping)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
-// Set sets the partners placements to products mappings to the parsed string.
+// Set sets the partners placements to products mappings to the JSON string.
 func (p *PartnersPlacementProductMap) Set(s string) error {
-	partnerPlacementProductMap := make(map[string]PlacementProductMap)
-
-	if strings.HasSuffix(s, "]") && !strings.HasSuffix(s, ";") {
-		s += ";"
+	if s == "" {
+		return nil
 	}
-	for _, partnerConfig := range strings.Split(s, "];") {
-		if partnerConfig == "" {
-			continue
-		}
 
-		info := strings.Split(partnerConfig, "[")
-		if len(info) != 2 {
-			return Error.New("Invalid partner placements to product string (expected format partner[placement0,placement1:product], got %s)", partnerConfig)
+	var mapping map[string]map[int32][]int
+	err := json.Unmarshal([]byte(s), &mapping)
+	if err != nil {
+		return err
+	}
+	partnerPlacementProductMap := make(map[string]PlacementProductMap)
+	for partner, productPlacement := range mapping {
+		placementProductMap := PlacementProductMap{
+			placementProductMap: make(map[int]int32),
 		}
-
-		partner := strings.TrimSpace(info[0])
-		if _, ok := partnerPlacementProductMap[partner]; ok {
-			return Error.New("Partner's placements to products mapping was defined more than once. Check the config for partner %s", partner)
-		}
-
-		var placementProductMap PlacementProductMap
-		err := placementProductMap.Set(info[1])
-		if err != nil {
-			return err
+		for product, placements := range productPlacement {
+			for _, placement := range placements {
+				placementProductMap.placementProductMap[placement] = product
+			}
 		}
 		partnerPlacementProductMap[partner] = placementProductMap
 	}
@@ -528,4 +503,18 @@ func (p *PackagePlans) Get(userAgent []byte) (pkg payments.PackagePlan, err erro
 		}
 	}
 	return payments.PackagePlan{}, errs.New("no matching partner for (%s)", userAgent)
+}
+
+// ValidatePlacementOverrideMap ensures placements and product IDs in price override maps exist.
+func ValidatePlacementOverrideMap(overrideMap map[int]int32, productPrices map[int32]payments.ProductUsagePriceModel, placements nodeselection.PlacementDefinitions) error {
+	for placement, productID := range overrideMap {
+		if _, ok := placements[storj.PlacementConstraint(placement)]; !ok {
+			return errs.New("placement %d not found in placement constraints", placement)
+		}
+
+		if _, ok := productPrices[productID]; !ok {
+			return errs.New("product %d not found in product prices", productID)
+		}
+	}
+	return nil
 }

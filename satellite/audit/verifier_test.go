@@ -1109,7 +1109,7 @@ func TestAuditRepairedSegmentInExcludedCountries(t *testing.T) {
 		numExcluded := 5
 		var nodesInExcluded storj.NodeIDList
 		for i := 0; i < numExcluded; i++ {
-			err = planet.Satellites[0].Overlay.Service.TestNodeCountryCode(ctx, remotePieces[i].StorageNode, "FR")
+			err = planet.Satellites[0].Overlay.Service.TestSetNodeCountryCode(ctx, remotePieces[i].StorageNode, "FR")
 			require.NoError(t, err)
 			nodesInExcluded = append(nodesInExcluded, remotePieces[i].StorageNode)
 		}
@@ -1129,9 +1129,7 @@ func TestAuditRepairedSegmentInExcludedCountries(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 1, count)
 
-		satellite.Repair.Repairer.Loop.Restart()
 		satellite.Repair.Repairer.Loop.TriggerWait()
-		satellite.Repair.Repairer.Loop.Pause()
 		require.NoError(t, satellite.Repair.Repairer.WaitForPendingRepairs(ctx))
 
 		// Verify that the segment was removed

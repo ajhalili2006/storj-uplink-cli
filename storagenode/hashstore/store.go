@@ -25,6 +25,7 @@ import (
 	"storj.io/common/context2"
 	"storj.io/common/memory"
 	"storj.io/drpc/drpcsignal"
+	"storj.io/storj/storagenode/hashstore/platform"
 )
 
 var (
@@ -50,6 +51,9 @@ var (
 
 	// controls the number of concurrent writers to log files.
 	store_WriterSemaphore = int(envInt("STORJ_HASHSTORE_STORE_WRITER_SEMAPHORE", 0))
+
+	// controls the number of concurrent flushes to log files.
+	store_FlushSemaphore = int(envInt("STORJ_HASHSTORE_STORE_FLUSH_SEMAPHORE", 0))
 )
 
 // Store is a hash table based key-value store with compaction.
@@ -66,6 +70,7 @@ type Store struct {
 	cloMu  sync.Mutex        // synchronizes closing
 
 	activeMu  *rwMutex // semaphore of active writes to log files
+	flushMu   *rwMutex // semaphore of active flushes to log files
 	compactMu *mutex   // held during compaction to ensure only 1 compaction at a time
 	reviveMu  *mutex   // held during revival to ensure only 1 object is revived from trash at a time
 
@@ -112,6 +117,7 @@ func NewStore(ctx context.Context, logsPath string, tablePath string, log *zap.L
 		lfc:       newLogCollection(),
 
 		activeMu:  newRWMutex(store_WriterSemaphore),
+		flushMu:   newRWMutex(store_FlushSemaphore),
 		compactMu: newMutex(),
 		reviveMu:  newMutex(),
 	}
@@ -138,7 +144,7 @@ func NewStore(ctx context.Context, logsPath string, tablePath string, log *zap.L
 		if err != nil {
 			return nil, Error.New("unable to create lock file: %w", err)
 		}
-		if err := optimisticFlock(s.lock); err != nil {
+		if err := platform.Flock(s.lock); err != nil {
 			return nil, Error.New("unable to flock: %w", err)
 		}
 	}
@@ -236,11 +242,15 @@ func NewStore(ctx context.Context, logsPath string, tablePath string, log *zap.L
 				}
 				defer af.Cancel()
 
-				ntbl, err := CreateTable(ctx, af.File, tbl_minLogSlots, s.today(), table_DefaultKind)
+				cons, err := CreateTable(ctx, af.File, tbl_minLogSlots, s.today(), table_DefaultKind)
 				if err != nil {
 					return Error.Wrap(err)
 				}
-				defer ntbl.Close()
+				tbl, err := cons.Done(ctx)
+				if err != nil {
+					return Error.Wrap(err)
+				}
+				defer tbl.Close()
 
 				return af.Commit()
 			}()
@@ -372,7 +382,7 @@ func (s *Store) createLogFile(ttl uint32) (*logFile, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, Error.Wrap(err)
 	}
-	fh, err := createFile(path)
+	fh, err := platform.CreateFile(path)
 	if err != nil {
 		return nil, Error.Wrap(err)
 	}
@@ -407,23 +417,31 @@ func (s *Store) addRecord(ctx context.Context, rec Record) error {
 	ok, err := s.tbl.Insert(ctx, rec)
 	if err != nil {
 		return Error.Wrap(err)
-	} else if !ok {
-		// if this happens, we're in some weird situation where our estimate of the load must be
-		// way off. as a last ditch effort, try to recompute the estimates, bump some counters, and
-		// loudly complain with some potentially helpful debugging information.
-		s.stats.tableFull.Add(1)
-		beforeLoad := s.tbl.Load()
-		estError := s.tbl.ComputeEstimates(ctx)
-		afterLoad := s.tbl.Load()
-		s.log.Error("hash table is full",
-			zap.NamedError("compute_estimates", estError),
-			zap.Float64("before_load", beforeLoad),
-			zap.Float64("after_load", afterLoad),
-		)
-		return Error.New("hash table is full")
-	} else {
+	} else if ok {
 		return nil
 	}
+
+	// if this happens, we're in some weird situation where our estimate of the load must be
+	// way off. as a last ditch effort, try to recompute the estimates, bump some counters, and
+	// loudly complain with some potentially helpful debugging information.
+	s.stats.tableFull.Add(1)
+
+	beforeStats := s.tbl.Stats()
+
+	if esti, ok := s.tbl.(interface{ ComputeEstimates(context.Context) error }); ok {
+		err = esti.ComputeEstimates(ctx)
+	} else {
+		err = Error.New("table does not support ComputeEstimates")
+	}
+
+	s.log.Error("hash table is full",
+		zap.NamedError("compute_estimates", err),
+		zap.Any("before_stats", beforeStats),
+		zap.Any("after_stats", s.tbl.Stats()),
+	)
+
+	return Error.New("hash table is full")
+
 }
 
 // Load returns the estimated load factor of the hash table. If it's too large, a Compact call is
@@ -433,23 +451,6 @@ func (s *Store) Load() float64 {
 	defer s.rmu.RUnlock()
 
 	return s.tbl.Load()
-}
-
-// ShouldCompact returns true if the underlying table indicates that a compaction would be useful.
-func (s *Store) ShouldCompact() bool {
-	s.rmu.RLock()
-	defer s.rmu.RUnlock()
-
-	return s.tbl.Load() >= s.tbl.CompactLoad()
-}
-
-// Loads returns the estimated load factor of the hash table, the load it should be compacted at,
-// and the load that it should no longer be written to.
-func (s *Store) Loads() (load, compact, max float64) {
-	s.rmu.RLock()
-	defer s.rmu.RUnlock()
-
-	return s.tbl.Load(), s.tbl.CompactLoad(), s.tbl.MaxLoad()
 }
 
 // Close interrupts any compactions and closes the store.
@@ -510,21 +511,9 @@ func (s *Store) Create(ctx context.Context, key Key, expires time.Time) (w *Writ
 		exp = NewExpiration(TimeToDateUp(expires), false)
 	}
 
-	// try to acquire the log file.
-	lf, err := s.acquireLogFile(exp.Time())
-	if err != nil {
-		return nil, Error.Wrap(err)
-	}
-
 	// return the automatic writer for the piece that unlocks and commits the record into the hash
 	// table on Close.
-	return newAutomaticWriter(ctx, s, lf, Record{
-		Key:     key,
-		Offset:  lf.size.Load(),
-		Log:     lf.id,
-		Created: s.today(),
-		Expires: exp,
-	}), nil
+	return newAutomaticWriter(ctx, s, key, exp), nil
 }
 
 // Read returns a Reader that reads data from the store. The Reader will be nil if the key does not
@@ -879,8 +868,9 @@ func (s *Store) compactOnce(
 	}
 
 	// special case: if we have some values in rewriteCandidates but we have no files in rewrite we
-	// need to include one to ensure progress.
-	if len(rewriteCandidates) > 0 && len(rewrite) == 0 {
+	// need to include one to ensure progress, unless the RewriteMultiple is 0 so we don't want to
+	// do any rewriting.
+	if len(rewriteCandidates) > 0 && len(rewrite) == 0 && compaction_RewriteMultiple > 0 {
 		for id := range rewriteCandidates {
 			rewrite[id] = true
 			break
@@ -923,21 +913,11 @@ func (s *Store) compactOnce(
 	}
 	defer af.Cancel()
 
-	ntbl, err := CreateTable(ctx, af.File, logSlots, today, table_DefaultKind)
+	cons, err := CreateTable(ctx, af.File, logSlots, today, table_DefaultKind)
 	if err != nil {
 		return false, Error.Wrap(err)
 	}
-
-	// only expect ordered if both tables have the same key ordering.
-	flush := func() error { return nil }
-	if ntbl.Header().HashKey == s.tbl.Header().HashKey {
-		var done func()
-		flush, done, err = ntbl.ExpectOrdered(ctx)
-		if err != nil {
-			return false, Error.Wrap(err)
-		}
-		defer done()
-	}
+	defer cons.Close()
 
 	// update the beginning of the write time for progress reporting.
 	s.stats.writeTime.Store(time.Now())
@@ -1023,7 +1003,7 @@ func (s *Store) compactOnce(
 		}
 
 		// insert the record into the new hash table.
-		if ok, err := ntbl.Insert(ctx, rec); err != nil {
+		if ok, err := cons.Append(ctx, rec); err != nil {
 			return false, Error.Wrap(err)
 		} else if !ok {
 			return false, Error.New("compaction hash table is full")
@@ -1037,7 +1017,8 @@ func (s *Store) compactOnce(
 		return false, err
 	}
 
-	if err := flush(); err != nil {
+	ntbl, err := cons.Done(ctx)
+	if err != nil {
 		return false, Error.Wrap(err)
 	}
 
@@ -1050,18 +1031,20 @@ func (s *Store) compactOnce(
 
 	// log information about important events that happened to records during the writing of the new
 	// hashtbl.
-	s.log.Info("hashtbl rewritten",
-		zap.Uint64("total records", totalRecords),
-		zap.String("total bytes", memory.FormatBytes(int64(totalBytes))),
-		zap.Uint64("rewritten records", rewrittenRecords),
-		zap.String("rewritten bytes", memory.FormatBytes(int64(rewrittenBytes))),
-		zap.Uint64("trashed records", trashedRecords),
-		zap.String("trashed bytes", memory.FormatBytes(int64(trashedBytes))),
-		zap.Uint64("restored records", restoredRecords),
-		zap.String("restored bytes", memory.FormatBytes(int64(restoredBytes))),
-		zap.Uint64("expired records", expiredRecords),
-		zap.String("expired bytes", memory.FormatBytes(int64(expiredBytes))),
-	)
+	if ce := s.log.Check(zapcore.InfoLevel, "hashtbl rewritten"); ce != nil {
+		ce.Write(
+			zap.Uint64("total records", totalRecords),
+			zap.String("total bytes", memory.FormatBytes(int64(totalBytes))),
+			zap.Uint64("rewritten records", rewrittenRecords),
+			zap.String("rewritten bytes", memory.FormatBytes(int64(rewrittenBytes))),
+			zap.Uint64("trashed records", trashedRecords),
+			zap.String("trashed bytes", memory.FormatBytes(int64(trashedBytes))),
+			zap.Uint64("restored records", restoredRecords),
+			zap.String("restored bytes", memory.FormatBytes(int64(restoredBytes))),
+			zap.Uint64("expired records", expiredRecords),
+			zap.String("expired bytes", memory.FormatBytes(int64(expiredBytes))),
+		)
+	}
 
 	// swap the new hash table in and collect the set of log files to remove. we don't close and
 	// remove the log files while holding the lock to avoid doing i/o while blocking readers.
@@ -1103,11 +1086,14 @@ func (s *Store) compactOnce(
 	})
 
 	// if we rewrote every log file that we could potentially rewrite, then we're done. len is
-	// sufficient here because rewrite is a subset of rewriteCandidates.
-	return len(rewriteCandidates) == len(rewrite), nil
+	// sufficient here because rewrite is a subset of rewriteCandidates. also if our rewrite
+	// multiple is 0, then we're done because we unlinked all the fully dead log files already.
+	return len(rewriteCandidates) == len(rewrite) || compaction_RewriteMultiple == 0, nil
 }
 
-func (s *Store) rewriteRecord(ctx context.Context, rec Record, rewriteCandidates map[uint64]bool) (Record, error) {
+func (s *Store) rewriteRecord(ctx context.Context, rec Record, rewriteCandidates map[uint64]bool) (_ Record, err error) {
+	defer mon.Task()(&ctx)(&err)
+
 	r, err := s.readerForRecord(ctx, rec)
 	if err != nil {
 		return rec, Error.Wrap(err)
@@ -1139,13 +1125,7 @@ func (s *Store) rewriteRecord(ctx context.Context, rec Record, rewriteCandidates
 	// create a Writer to handle writing the entry into the log file. manual mode is set
 	// so that it doesn't attempt to add the record to the current hash table or unlock
 	// the active mutex upon Close or Cancel.
-	w := newManualWriter(ctx, s, into, Record{
-		Key:     rec.Key,
-		Offset:  into.size.Load(),
-		Log:     into.id,
-		Created: rec.Created,
-		Expires: rec.Expires,
-	})
+	w := newManualWriter(ctx, s, into, rec.Key, rec.Created, rec.Expires)
 	defer w.Cancel()
 
 	// copy the record data.

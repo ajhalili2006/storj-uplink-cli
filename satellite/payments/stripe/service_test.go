@@ -1609,15 +1609,19 @@ func TestProjectUsagePrice(t *testing.T) {
 
 func TestPartnerPlacements(t *testing.T) {
 	var (
-		product         = "product"
 		partner         = "partner"
 		placement       = storj.PlacementConstraint(10)
+		placement11     = storj.PlacementConstraint(11)
 		placementDetail = console.PlacementDetail{
 			ID:     10,
 			IdName: "placement10",
 		}
+		placementDetail11 = console.PlacementDetail{
+			ID:     11,
+			IdName: "placement11",
+		}
+		productID    = int32(1)
 		productPrice = paymentsconfig.ProductUsagePrice{
-			ProductID: 1,
 			ProjectUsagePrice: paymentsconfig.ProjectUsagePrice{
 				StorageTB: "4",
 				EgressTB:  "5",
@@ -1632,17 +1636,24 @@ func TestPartnerPlacements(t *testing.T) {
 		SatelliteCount: 1, StorageNodeCount: 0, UplinkCount: 0,
 		Reconfigure: testplanet.Reconfigure{
 			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
-				config.Placement = nodeselection.ConfigurablePlacementRule{PlacementRules: `10:annotation("location", "placement10")`}
-				config.Payments.Products.SetMap(map[string]paymentsconfig.ProductUsagePrice{
-					product: productPrice,
+				config.Placement = nodeselection.ConfigurablePlacementRule{
+					PlacementRules: `10:annotation("location", "placement10");11:annotation("location", "placement11")`,
+				}
+				config.Payments.Products.SetMap(map[int32]paymentsconfig.ProductUsagePrice{
+					productID: productPrice,
 				})
-				config.Payments.PlacementPriceOverrides.SetMap(map[int]string{int(placement): product})
+				// global placement price overrides
+				config.Payments.PlacementPriceOverrides.SetMap(map[int]int32{int(placement11): productID})
+
+				placementProductMap := paymentsconfig.PlacementProductMap{}
+				placementProductMap.SetMap(map[int]int32{int(placement): productID})
 				config.Payments.PartnersPlacementPriceOverrides.SetMap(map[string]paymentsconfig.PlacementProductMap{
-					partner: config.Payments.PlacementPriceOverrides,
+					partner: placementProductMap,
 				})
-				config.Console.SelfServePlacementDetails.SetMap(map[storj.PlacementConstraint]console.PlacementDetail{
-					0:         {ID: 0},
-					placement: placementDetail,
+				config.Console.Placement.SelfServeDetails.SetMap(map[storj.PlacementConstraint]console.PlacementDetail{
+					0:           {ID: 0},
+					placement:   placementDetail,
+					placement11: placementDetail11,
 				})
 			},
 		},
@@ -1679,12 +1690,14 @@ func TestPartnerPlacements(t *testing.T) {
 		require.Len(t, details, 1)
 		require.Equal(t, placementDetail, details[0])
 
+		// empty user agent will fall back to global placement configs
 		err = sat.DB.Console().Projects().UpdateUserAgent(ctx, proj.ID, make([]byte, 0))
 		require.NoError(t, err)
 
 		details, err = sat.API.Console.Service.GetPlacementDetails(userCtx, proj.ID)
 		require.NoError(t, err)
-		require.Empty(t, details)
+		require.Len(t, details, 1)
+		require.Equal(t, placementDetail11, details[0])
 	})
 }
 

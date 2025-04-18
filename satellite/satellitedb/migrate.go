@@ -935,6 +935,22 @@ func (db *satelliteDB) productionMigrationSpanner() *migrate.Migration {
 					`DROP TABLE IF EXISTS storagenode_bandwidth_rollups_phase2`,
 				},
 			},
+			{
+				DB:          &db.migrationDB,
+				Description: "add column to users table to track user type",
+				Version:     290,
+				Action: migrate.SQL{
+					`ALTER TABLE users ADD COLUMN kind INT64 NOT NULL DEFAULT (0)`,
+				},
+			},
+			{
+				DB:          &db.migrationDB,
+				Description: "update user kind to 1 (PRO) for paid tier users",
+				Version:     291,
+				Action: migrate.SQL{
+					`UPDATE users SET kind = 1 WHERE paid_tier = true`,
+				},
+			},
 			// NB: after updating testdata in `testdata`, run
 			//     `go generate` to update `migratez.go`.
 		},
@@ -3710,6 +3726,22 @@ func (db *satelliteDB) productionMigrationPostgres() *migrate.Migration {
 				Version:     289,
 				Action: migrate.SQL{
 					`DROP TABLE IF EXISTS storagenode_bandwidth_rollups_phase2`,
+				},
+			},
+			{
+				DB:          &db.migrationDB,
+				Description: "add column to users table to track user kind",
+				Version:     290,
+				Action: migrate.SQL{
+					`ALTER TABLE users ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;`,
+				},
+			},
+			{
+				DB:          &db.migrationDB,
+				Description: "update user kind to 1 (PRO) for paid tier users",
+				Version:     291,
+				Action: migrate.SQL{
+					`UPDATE users SET kind = 1 WHERE paid_tier = true`,
 				},
 			},
 			// NB: after updating testdata in `testdata`, run

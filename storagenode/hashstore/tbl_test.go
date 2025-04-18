@@ -6,6 +6,7 @@ package hashstore
 import (
 	"context"
 	"math/rand"
+	"os"
 	"testing"
 	"time"
 
@@ -18,7 +19,7 @@ func TestTable_BasicOperation(t *testing.T) {
 }
 func testTable_BasicOperation(t *testing.T) {
 	ctx := context.Background()
-	tbl := newTestTable(t, tbl_minLogSlots)
+	tbl := newTestTbl(t, tbl_minLogSlots)
 	defer tbl.Close()
 
 	var keys []Key
@@ -80,7 +81,7 @@ func TestTable_OverwriteRecords(t *testing.T) {
 }
 func testTable_OverwriteMergeRecords(t *testing.T) {
 	ctx := context.Background()
-	tbl := newTestTable(t, tbl_minLogSlots)
+	tbl := newTestTbl(t, tbl_minLogSlots)
 	defer tbl.Close()
 
 	// create a new record with a non-zero expiration.
@@ -134,7 +135,7 @@ func TestTable_RangeExitEarly(t *testing.T) {
 }
 func testTable_RangeExitEarly(t *testing.T) {
 	ctx := context.Background()
-	h := newTestHashtbl(t, tbl_minLogSlots)
+	h := newTestHashTbl(t, tbl_minLogSlots)
 	defer h.Close()
 
 	// insert some records to range over.
@@ -150,42 +151,204 @@ func testTable_RangeExitEarly(t *testing.T) {
 	}))
 }
 
-func TestTable_ExpectOrdered(t *testing.T) {
-	forAllTables(t, testTable_ExpectOrdered)
+func TestTable_Full(t *testing.T) {
+	forAllTables(t, testTable_Full)
 }
-func testTable_ExpectOrdered(t *testing.T) {
+func testTable_Full(t *testing.T) {
 	ctx := context.Background()
-	tbl := newTestTable(t, tbl_minLogSlots)
+	tbl := newTestTbl(t, tbl_minLogSlots)
 	defer tbl.Close()
 
-	commit, done, err := tbl.ExpectOrdered(ctx)
-	assert.NoError(t, err)
-	defer done()
+	// fill the table completely.
+	for i := 0; i < 1<<tbl_minLogSlots; i++ {
+		tbl.AssertInsert()
+	}
+	assert.Equal(t, tbl.Load(), 1.0)
 
-	// write records until an automatic flush happens
-	var recs []Record
-	for {
-		rec := tbl.AssertInsert()
-		recs = append(recs, rec)
-		size, err := fileSize(tbl.Handle())
+	// inserting a new record should fail.
+	ok, err := tbl.Insert(ctx, newRecord(newKey()))
+	assert.NoError(t, err)
+	assert.False(t, ok)
+
+	// looking up a key that does not exist should fail.
+	_, ok, err = tbl.Lookup(ctx, newKey())
+	assert.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestTable_Load(t *testing.T) {
+	forAllTables(t, testTable_Load)
+}
+func testTable_Load(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a new memtbl with the specified size
+	tbl := newTestTbl(t, tbl_minLogSlots)
+	defer tbl.Close()
+
+	check := func(expectedLoad float64, deep bool) {
+		if deep {
+			// Check that the Stats() function's Load field matches
+			stats := tbl.Stats()
+			assert.Equal(t, stats.Load, expectedLoad)
+
+			// The following conditions only work for the memtbl
+			if _, ok := tbl.Tbl.(*MemTbl); ok {
+				// Verify load is correct after reopening
+				tbl.AssertReopen()
+				assert.Equal(t, tbl.Load(), expectedLoad)
+			}
+		}
+
+		// Check that the Load() function returns the correct value
+		assert.Equal(t, tbl.Load(), expectedLoad)
+	}
+
+	// insert records until the table is full and check every time, doing a deep check periodically.
+	for i := 0; ; i++ {
+		ok, err := tbl.Insert(ctx, newRecord(newKey()))
 		assert.NoError(t, err)
-		if size > headerSize {
+
+		if !ok {
 			break
 		}
+
+		check(float64(i+1)/float64(1<<tbl_minLogSlots), i%1000 == 0)
 	}
 
-	// write some more records and ensure they aren't immediately visible
-	for i := 0; i < 100; i++ {
-		rec := tbl.AssertInsert()
-		tbl.AssertLookupMiss(rec.Key)
-		recs = append(recs, rec)
+	// do a final deep check when the table is full.
+	check(1.0, true)
+}
+
+func TestTable_TrashStats(t *testing.T) {
+	forAllTables(t, testTable_TrashStats)
+}
+func testTable_TrashStats(t *testing.T) {
+	tbl := newTestTbl(t, tbl_minLogSlots)
+	defer tbl.Close()
+
+	rec := newRecord(newKey())
+	rec.Expires = NewExpiration(1, true)
+	tbl.AssertInsertRecord(rec)
+
+	stats := tbl.Stats()
+	assert.Equal(t, stats.NumTrash, 1)
+	assert.Equal(t, stats.LenTrash, rec.Length)
+	assert.Equal(t, stats.AvgTrash, float64(rec.Length))
+}
+
+func TestTable_LRecBounds(t *testing.T) {
+	forAllTables(t, testTable_LRecBounds)
+}
+func testTable_LRecBounds(t *testing.T) {
+	ctx := context.Background()
+
+	_, err := CreateTable(ctx, nil, tbl_maxLogSlots+1, 0, table_DefaultKind)
+	assert.Error(t, err)
+
+	_, err = CreateTable(ctx, nil, tbl_minLogSlots-1, 0, table_DefaultKind)
+	assert.Error(t, err)
+}
+
+func TestTable_ConstructorAPIAfterClose(t *testing.T) {
+	forAllTables(t, testTable_ConstructorAPIAfterClose)
+}
+func testTable_ConstructorAPIAfterClose(t *testing.T) {
+	ctx := context.Background()
+
+	fh, err := os.CreateTemp(t.TempDir(), "tbl")
+	assert.NoError(t, err)
+	defer func() { _ = fh.Close() }()
+
+	cons, err := CreateTable(ctx, fh, tbl_minLogSlots, 0, table_DefaultKind)
+	assert.NoError(t, err)
+	defer cons.Close()
+
+	ok, err := cons.Append(ctx, newRecord(newKey()))
+	assert.NoError(t, err)
+	assert.True(t, ok)
+
+	// after closne, append and done should now error.
+	cons.Close()
+
+	ok, err = cons.Append(ctx, newRecord(newKey()))
+	assert.Error(t, err)
+	assert.False(t, ok)
+
+	tbl, err := cons.Done(ctx)
+	assert.Error(t, err)
+	assert.Nil(t, tbl)
+}
+
+func TestTable_ConstructorAPIAfterDone(t *testing.T) {
+	forAllTables(t, testTable_ConstructorAPIAfterDone)
+}
+func testTable_ConstructorAPIAfterDone(t *testing.T) {
+	ctx := context.Background()
+
+	fh, err := os.CreateTemp(t.TempDir(), "tbl")
+	assert.NoError(t, err)
+	defer func() { _ = fh.Close() }()
+
+	cons, err := CreateTable(ctx, fh, tbl_minLogSlots, 0, table_DefaultKind)
+	assert.NoError(t, err)
+	defer cons.Close()
+
+	ok, err := cons.Append(ctx, newRecord(newKey()))
+	assert.NoError(t, err)
+	assert.True(t, ok)
+
+	// after done, append and done should now error.
+	tbl, err := cons.Done(ctx)
+	assert.NoError(t, err)
+	assert.NotNil(t, tbl)
+	defer tbl.Close()
+
+	ok, err = cons.Append(ctx, newRecord(newKey()))
+	assert.Error(t, err)
+	assert.False(t, ok)
+
+	tbl, err = cons.Done(ctx)
+	assert.Error(t, err)
+	assert.Nil(t, tbl)
+}
+
+func TestTable_InvalidHeaders(t *testing.T) {
+	fh, err := os.CreateTemp(t.TempDir(), "tbl")
+	assert.NoError(t, err)
+	defer func() { _ = fh.Close() }()
+
+	hdr := TblHeader{
+		Created:  1,
+		HashKey:  true,
+		Kind:     kind_HashTbl,
+		LogSlots: 4,
 	}
 
-	// after a commit, all of them should be visible
-	assert.NoError(t, commit())
-	for _, rec := range recs {
-		tbl.AssertLookup(rec.Key)
+	// ensure modifying every byte in the header is an error
+	for offset := int64(0); offset < headerSize; offset++ {
+		assert.NoError(t, WriteTblHeader(fh, hdr))
+		_, err = fh.WriteAt([]byte{0xde}, offset)
+		assert.NoError(t, err)
+		_, err = ReadTblHeader(fh)
+		assert.Error(t, err)
 	}
+}
+
+func TestTable_OpenIncorrectKind(t *testing.T) {
+	ctx := context.Background()
+
+	h := newTestHashTbl(t, tbl_minLogSlots)
+	defer h.Close()
+
+	m := newTestMemTbl(t, tbl_minLogSlots)
+	defer m.Close()
+
+	_, err := OpenMemTbl(ctx, h.fh)
+	assert.Error(t, err)
+
+	_, err = OpenHashTbl(ctx, m.fh)
+	assert.Error(t, err)
 }
 
 //
@@ -197,7 +360,7 @@ func BenchmarkTable(b *testing.B) {
 }
 func benchmarkTable(b *testing.B) {
 	benchmarkLRecs(b, "Lookup", func(b *testing.B, lrec uint64) {
-		tbl := newTestTable(b, lrec)
+		tbl := newTestTbl(b, lrec)
 		defer tbl.Close()
 
 		var keys []Key
@@ -226,7 +389,7 @@ func benchmarkTable(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			func() {
-				tbl := newTestTable(b, lrec)
+				tbl := newTestTbl(b, lrec)
 				defer tbl.Close()
 				for i := 0; i < inserts; i++ {
 					tbl.AssertInsert()
@@ -235,41 +398,36 @@ func benchmarkTable(b *testing.B) {
 		}
 
 		b.ReportMetric(float64(b.N)*float64(inserts)/time.Since(now).Seconds(), "keys/sec")
+		b.ReportMetric(float64(time.Since(now))/float64(b.N)/float64(inserts), "ns/key")
 	})
 
 	benchmarkLRecs(b, "Compact", func(b *testing.B, lrec uint64) {
 		inserts := 1 << lrec / 2
 
 		ctx := context.Background()
-		tbl := newTestTable(b, lrec)
+		tbl := newTestTbl(b, lrec)
 		defer tbl.Close()
 
 		for i := 0; i < inserts; i++ {
 			tbl.AssertInsert()
 		}
-		var recs []Record
-		assert.NoError(b, tbl.Range(ctx, func(ctx context.Context, rec Record) (bool, error) {
-			recs = append(recs, rec)
-			return true, nil
-		}))
 
 		b.ReportAllocs()
 		b.ResetTimer()
 		now := time.Now()
 
 		for i := 0; i < b.N; i++ {
-			tbl := newTestTable(b, lrec+1)
-			flush, _, err := tbl.ExpectOrdered(ctx)
-			assert.NoError(b, err)
-
-			for _, rec := range recs {
-				tbl.AssertInsertRecord(rec)
-			}
-
-			assert.NoError(b, flush())
-			tbl.Close()
+			newTestTbl(b, lrec+1, WithConstructor(func(tc TblConstructor) {
+				assert.NoError(b, tbl.Range(ctx, func(ctx context.Context, rec Record) (bool, error) {
+					ok, err := tc.Append(ctx, rec)
+					assert.NoError(b, err)
+					assert.That(b, ok)
+					return true, nil
+				}))
+			})).Close()
 		}
 
 		b.ReportMetric(float64(b.N)*float64(inserts)/time.Since(now).Seconds(), "keys/sec")
+		b.ReportMetric(float64(time.Since(now))/float64(b.N)/float64(inserts), "ns/key")
 	})
 }

@@ -70,6 +70,21 @@ func TestUserRepository(t *testing.T) {
 			SignupPromoCode: signupPromoCode,
 		}
 		testUsers(ctx, t, repository, user)
+
+		// test inserting paid user
+		user = &console.User{
+			ID:           testrand.UUID(),
+			FullName:     name,
+			ShortName:    lastName,
+			Email:        email,
+			PaidTier:     true,
+			PasswordHash: []byte(passValid),
+			CreatedAt:    time.Now(),
+		}
+		user, err := repository.Insert(ctx, user)
+		assert.NoError(t, err)
+		assert.True(t, user.PaidTier)
+		assert.Equal(t, console.PaidUser, user.Kind)
 	})
 }
 
@@ -149,6 +164,7 @@ func TestUserUpdatePaidTier(t *testing.T) {
 		require.Equal(t, fullName, retrievedUser.FullName)
 		require.Equal(t, shortName, retrievedUser.ShortName)
 		require.True(t, retrievedUser.PaidTier)
+		require.Equal(t, console.PaidUser, retrievedUser.Kind)
 		require.WithinDuration(t, now, *retrievedUser.UpgradeTime, time.Minute)
 
 		err = db.Console().Users().UpdatePaidTier(ctx, createdUser.ID, false, projectBandwidthLimit, storageStorageLimit, segmentLimit, projectLimit, nil)
@@ -157,6 +173,7 @@ func TestUserUpdatePaidTier(t *testing.T) {
 		retrievedUser, err = db.Console().Users().Get(ctx, createdUser.ID)
 		require.NoError(t, err)
 		require.False(t, retrievedUser.PaidTier)
+		require.Equal(t, console.FreeUser, retrievedUser.Kind)
 		require.WithinDuration(t, now, *retrievedUser.UpgradeTime, time.Minute)
 	})
 }
@@ -183,6 +200,7 @@ func testUsers(ctx context.Context, t *testing.T, repository console.Users, user
 		assert.Equal(t, lastName, userByEmail.ShortName)
 		assert.Equal(t, user.SignupPromoCode, userByEmail.SignupPromoCode)
 		assert.False(t, user.PaidTier)
+		assert.Equal(t, console.FreeUser, user.Kind)
 		assert.False(t, user.MFAEnabled)
 		assert.Empty(t, user.MFASecretKey)
 		assert.Empty(t, user.MFARecoveryCodes)
@@ -275,6 +293,7 @@ func testUsers(ctx context.Context, t *testing.T, repository console.Users, user
 		assert.Equal(t, newEmail, newUser.Email)
 		assert.Equal(t, []byte(newPass), newUser.PasswordHash)
 		assert.True(t, newUser.PaidTier)
+		assert.Equal(t, console.PaidUser, newUser.Kind)
 		assert.True(t, newUser.MFAEnabled)
 		assert.Equal(t, mfaSecretKey, newUser.MFASecretKey)
 		assert.Equal(t, newUserInfo.MFARecoveryCodes, newUser.MFARecoveryCodes)
@@ -661,17 +680,81 @@ func TestGetUnverifiedNeedingReminder(t *testing.T) {
 	})
 }
 
-func TestUserStatus_String(t *testing.T) {
-	for i := 0; i < console.UserStatusCount; i++ {
-		require.NotEmptyf(
-			t, console.UserStatus(i).String(), "status without associated string representation: %d", i,
+func TestUserStatus(t *testing.T) {
+	t.Run("String", func(t *testing.T) {
+		for i := 0; i < console.UserStatusCount; i++ {
+			status := console.UserStatus(i)
+			require.NotEmptyf(
+				t, status.String(), "status without associated string representation: %d", i,
+			)
+		}
+
+		// We add one to the highest value to verify it returns an empty string.
+		status := console.UserStatus(console.UserStatusCount)
+		require.Emptyf(t,
+			status.String(),
+			"invalid status should return empty string: %d", console.UserStatusCount,
 		)
-	}
+	})
 
-	// We add one to the highest value to verify it returns an empty string.
-	require.Emptyf(t,
-		console.UserStatus(console.UserStatusCount).String(),
-		"invalid status should return empty string: %d", console.UserStatusCount,
-	)
+	t.Run("Set", func(t *testing.T) {
+		tcases := []struct {
+			status   string
+			isValid  bool
+			expected console.UserStatus
+		}{
+			{
+				status:   "inactive",
+				isValid:  true,
+				expected: console.Inactive,
+			},
+			{
+				status:   "Active",
+				isValid:  true,
+				expected: console.Active,
+			},
+			{
+				status:   "DELETED",
+				isValid:  true,
+				expected: console.Deleted,
+			},
+			{
+				status:   "PendinG DeletioN",
+				isValid:  true,
+				expected: console.PendingDeletion,
+			},
+			{
+				status:   "Legal Hold",
+				isValid:  true,
+				expected: console.LegalHold,
+			},
+			{
+				status:   "pending bot verification",
+				isValid:  true,
+				expected: console.PendingBotVerification,
+			},
+			{
+				status:   "user requested Deletion",
+				isValid:  true,
+				expected: console.UserRequestedDeletion,
+			},
+			{
+				status:  "does not exists this status",
+				isValid: false,
+			},
+		}
 
+		var status console.UserStatus
+		for _, tcase := range tcases {
+			err := status.Set(tcase.status)
+			if err != nil {
+				require.False(t, tcase.isValid)
+				require.ErrorContains(t, err, tcase.status)
+			} else {
+				require.True(t, tcase.isValid)
+				require.NoError(t, err)
+				require.Equal(t, tcase.expected, status)
+			}
+		}
+	})
 }

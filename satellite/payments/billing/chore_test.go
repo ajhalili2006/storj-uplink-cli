@@ -129,10 +129,8 @@ func TestChore(t *testing.T) {
 		defer ctx.Check(chore.Close)
 
 		// Trigger (at least) two loops to process all batches.
-		chore.TransactionCycle.Pause()
 		chore.TransactionCycle.TriggerWait()
 		chore.TransactionCycle.TriggerWait()
-		chore.TransactionCycle.Pause()
 
 		assertTXs(ctx, t, db, mike, mikeTXs)
 		assertTXs(ctx, t, db, joe, joeTXs)
@@ -251,10 +249,10 @@ func TestChore_UpgradeUserObserver(t *testing.T) {
 		})
 		defer ctx.Check(chore.Close)
 
+		chore.TransactionCycle.Pause()
+
 		t.Run("user upgrade status", func(t *testing.T) {
-			chore.TransactionCycle.Pause()
 			chore.TransactionCycle.TriggerWait()
-			chore.TransactionCycle.Pause()
 
 			balance, err := db.Billing().GetBalance(ctx, user.ID)
 			require.NoError(t, err)
@@ -264,6 +262,7 @@ func TestChore_UpgradeUserObserver(t *testing.T) {
 			user, err = db.Console().Users().Get(ctx, user.ID)
 			require.NoError(t, err)
 			require.False(t, user.PaidTier)
+			require.Equal(t, console.FreeUser, user.Kind)
 
 			projects, err := db.Console().Projects().GetOwn(ctx, user.ID)
 			require.NoError(t, err)
@@ -280,7 +279,6 @@ func TestChore_UpgradeUserObserver(t *testing.T) {
 			})
 
 			chore.TransactionCycle.TriggerWait()
-			chore.TransactionCycle.Pause()
 
 			balance, err = db.Billing().GetBalance(ctx, user.ID)
 			require.NoError(t, err)
@@ -290,6 +288,7 @@ func TestChore_UpgradeUserObserver(t *testing.T) {
 			user, err = db.Console().Users().Get(ctx, user.ID)
 			require.NoError(t, err)
 			require.True(t, user.PaidTier)
+			require.Equal(t, console.PaidUser, user.Kind)
 			require.WithinDuration(t, now, *user.UpgradeTime, time.Minute)
 			require.Equal(t, usageLimitsConfig.Storage.Paid.Int64(), user.ProjectStorageLimit)
 			require.Equal(t, usageLimitsConfig.Bandwidth.Paid.Int64(), user.ProjectBandwidthLimit)
@@ -311,12 +310,10 @@ func TestChore_UpgradeUserObserver(t *testing.T) {
 			require.NoError(t, freezeService.ViolationFreezeUser(ctx, user3.ID))
 
 			chore.TransactionCycle.TriggerWait()
-			chore.TransactionCycle.Pause()
 
 			expected := currency.AmountFromBaseUnits((amount1+amount2)*int64(10000), currency.USDollarsMicro)
 
 			chore.TransactionCycle.TriggerWait()
-			chore.TransactionCycle.Pause()
 
 			balance, err := db.Billing().GetBalance(ctx, user2.ID)
 			require.NoError(t, err)
@@ -333,10 +330,12 @@ func TestChore_UpgradeUserObserver(t *testing.T) {
 			user, err = db.Console().Users().Get(ctx, user2.ID)
 			require.NoError(t, err)
 			require.False(t, user.PaidTier)
+			require.Equal(t, console.FreeUser, user.Kind)
 
 			user, err = db.Console().Users().Get(ctx, user3.ID)
 			require.NoError(t, err)
 			require.False(t, user.PaidTier)
+			require.Equal(t, console.FreeUser, user.Kind)
 		})
 	})
 }

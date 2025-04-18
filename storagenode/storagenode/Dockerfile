@@ -3,10 +3,10 @@ ARG DOCKER_ARCH
 ARG GO_DOCKER_PLATFORM
 ARG GO_VERSION=1.24.2
 
-FROM --platform=${DOCKER_PLATFORM:-linux/amd64} ${DOCKER_ARCH:-amd64}/debian:bookworm-slim as base
+FROM --platform=${DOCKER_PLATFORM:-linux/amd64} ${DOCKER_ARCH:-amd64}/debian:bookworm-slim AS base
 RUN apt-get update
 
-FROM base as ca-cert
+FROM base AS ca-cert
 RUN apt-get install -y --no-install-recommends ca-certificates
 RUN update-ca-certificates
 
@@ -28,7 +28,7 @@ RUN --mount=type=cache,target="/root/.cache/go-build" \
       -X storj.io/common/version.buildCommitHash=$BUILD_COMMIT \
       -X storj.io/common/version.buildTimestamp=$BUILD_DATE" ./storagenode/storagenode
 
-FROM base
+FROM base AS build
 RUN apt-get install -y graphviz
 COPY --from=ca-cert /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /go/bin/storagenode /app/storagenode

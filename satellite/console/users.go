@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/zeebo/errs"
@@ -205,9 +206,19 @@ const (
 	UserStatusCount int = 7
 )
 
+// UserKind - is used to indicate kind of the user's account.
+type UserKind int
+
+const (
+	// FreeUser is a kind of user that has free account.
+	FreeUser UserKind = 0
+	// PaidUser is a kind of user that has paid account.
+	PaidUser UserKind = 1
+)
+
 // String returns a string representation of the user status.
-func (s UserStatus) String() string {
-	switch s {
+func (s *UserStatus) String() string {
+	switch *s {
 	case Inactive:
 		return "Inactive"
 	case Active:
@@ -228,13 +239,43 @@ func (s UserStatus) String() string {
 }
 
 // Value implements database/sql/driver.Valuer for UserStatus.
-func (s UserStatus) Value() (driver.Value, error) {
-	return int64(s), nil
+func (s *UserStatus) Value() (driver.Value, error) {
+	return int64(*s), nil
 }
 
 // Valid checks if the user status is valid.
-func (s UserStatus) Valid() bool {
+func (s *UserStatus) Valid() bool {
 	return s.String() != ""
+}
+
+// Set the status value from a string.
+// It satisfies the pflag.Value interface.
+func (s *UserStatus) Set(status string) error {
+	statuses := make([]string, 0, UserStatusCount)
+	for i := 0; true; i++ {
+		uStatus := UserStatus(i)
+		strStatus := uStatus.String()
+		if strStatus == "" {
+			break
+		}
+
+		if strings.EqualFold(status, strStatus) {
+			*s = uStatus
+			return nil
+		}
+
+		statuses = append(statuses, strStatus)
+	}
+
+	return Error.New(
+		"invalid user status: %q. Valid statuses are: %s", status, strings.Join(statuses, ", "),
+	)
+}
+
+// Type returns the type's name.
+// It satisfies the pflag.Value interface.
+func (*UserStatus) Type() string {
+	return "UserStatus"
 }
 
 // User is a database object that describes User entity.
@@ -254,11 +295,12 @@ type User struct {
 
 	CreatedAt time.Time `json:"createdAt"`
 
-	ProjectLimit          int   `json:"projectLimit"`
-	ProjectStorageLimit   int64 `json:"projectStorageLimit"`
-	ProjectBandwidthLimit int64 `json:"projectBandwidthLimit"`
-	ProjectSegmentLimit   int64 `json:"projectSegmentLimit"`
-	PaidTier              bool  `json:"paidTier"`
+	ProjectLimit          int      `json:"projectLimit"`
+	ProjectStorageLimit   int64    `json:"projectStorageLimit"`
+	ProjectBandwidthLimit int64    `json:"projectBandwidthLimit"`
+	ProjectSegmentLimit   int64    `json:"projectSegmentLimit"`
+	PaidTier              bool     `json:"paidTier"`
+	Kind                  UserKind `json:"kind"`
 
 	IsProfessional bool   `json:"isProfessional"`
 	Position       string `json:"position"`
@@ -361,6 +403,7 @@ type UpdateUserRequest struct {
 	ProjectBandwidthLimit *int64
 	ProjectSegmentLimit   *int64
 	PaidTier              *bool
+	Kind                  *UserKind
 
 	MFAEnabled       *bool
 	MFASecretKey     **string

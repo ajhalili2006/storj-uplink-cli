@@ -16,6 +16,8 @@ import (
 
 	"github.com/zeebo/assert"
 	"github.com/zeebo/mwc"
+
+	"storj.io/storj/storagenode/hashstore/platform"
 )
 
 func TestStore_BasicOperation(t *testing.T) {
@@ -97,7 +99,7 @@ func TestStore_FileLocking(t *testing.T) {
 	forAllTables(t, testStore_FileLocking)
 }
 func testStore_FileLocking(t *testing.T) {
-	if !flockSupported {
+	if !platform.FlockSupported {
 		t.Skip("flock not supported on this platform")
 	}
 
@@ -532,6 +534,44 @@ func testStore_ReadRevivesTrash(t *testing.T) {
 	assert.True(t, r.Trash())
 }
 
+func TestStore_LogFilesFull(t *testing.T) {
+	forAllTables(t, testStore_LogFilesFull)
+}
+func testStore_LogFilesFull(t *testing.T) {
+	// Set a very small MaxLogSize to force frequent log file creation
+	defer temporarily(&compaction_MaxLogSize, 256)()
+
+	s := newTestStore(t)
+	defer s.Close()
+
+	// Create enough data to fill multiple log files
+	var keys []Key
+	for i := 0; i < 100; i++ {
+		key := s.AssertCreate()
+		keys = append(keys, key)
+	}
+
+	// Verify all pieces can still be read
+	for _, key := range keys {
+		s.AssertRead(key)
+	}
+
+	// Create additional data after reads
+	for i := 0; i < 50; i++ {
+		key := s.AssertCreate()
+		keys = append(keys, key)
+	}
+
+	// Verify all pieces can still be read
+	for _, key := range keys {
+		s.AssertRead(key)
+	}
+
+	// Check stats to make sure we've used multiple log files
+	stats := s.Stats()
+	assert.That(t, stats.NumLogs > 1)
+}
+
 func TestStore_MergeRecordsWhenCompactingWithLostPage(t *testing.T) {
 	if table_DefaultKind != kind_HashTbl {
 		t.SkipNow()
@@ -552,7 +592,7 @@ func TestStore_MergeRecordsWhenCompactingWithLostPage(t *testing.T) {
 	// create a large key in the third page so that the log file is kept alive.
 	kl := newKeyAt(s.tbl.(*HashTbl), 2, 0, 0)
 
-	s.AssertCreate(WithKey(kl), WithData(make([]byte, 10*1024)))
+	s.AssertCreate(WithKey(kl), WithDataSize(10*1024))
 
 	// compact the store flagging k1 as trash.
 	assert.NoError(t, s.Compact(ctx, func(_ context.Context, key Key, _ time.Time) bool {
@@ -988,9 +1028,9 @@ func testStore_CompactionMakesForwardProgress(t *testing.T) {
 	// a single large (multi-MB) entry and many small but dead entries and
 	// triggering compaction.
 
-	large := s.AssertCreate(WithData(make([]byte, 10<<20)))
+	large := s.AssertCreate(WithDataSize(10 << 20))
 	for i := 0; i < 1<<10; i++ {
-		s.AssertCreate(WithData(make([]byte, 10<<10)))
+		s.AssertCreate(WithDataSize(10 << 10))
 	}
 	s.AssertCompact(func(ctx context.Context, key Key, created time.Time) bool {
 		return key != large
@@ -1142,8 +1182,7 @@ func testStore_CompactionRewritesLogsWhenNothingToDo(t *testing.T) {
 	// make a ballast key that stays alive that should prevent the log file from being rewritten
 	// under normal conditions and an already expired key so that the log is not fully alive so that
 	// it can be considered a candidate regardless.
-	data := make([]byte, 4096)
-	ballast := s.AssertCreate(WithData(data))
+	ballast := s.AssertCreate(WithDataSize(4096))
 	assert.Equal(t, getLog(ballast), 1)
 
 	s.AssertCreate(WithData(nil), WithTTL(time.Unix(1, 0)))
@@ -1156,7 +1195,7 @@ func testStore_CompactionRewritesLogsWhenNothingToDo(t *testing.T) {
 		stats := s.Stats()
 		assert.Equal(t, stats.Compactions, 1)
 		assert.Equal(t, stats.LogsRewritten, 1)
-		assert.Equal(t, stats.DataRewritten, len(data)+RecordSize)
+		assert.Equal(t, stats.DataRewritten, 4096+RecordSize)
 	}
 
 	// the log should be fully alive data and so should not be rewritten on subsequent compactions.
@@ -1167,11 +1206,69 @@ func testStore_CompactionRewritesLogsWhenNothingToDo(t *testing.T) {
 		stats := s.Stats()
 		assert.Equal(t, stats.Compactions, 2)
 		assert.Equal(t, stats.LogsRewritten, 1)
-		assert.Equal(t, stats.DataRewritten, len(data)+RecordSize)
+		assert.Equal(t, stats.DataRewritten, 4096+RecordSize)
 	}
 
 	// we should still be able to read the ballast still.
-	s.AssertRead(ballast, WithData(data))
+	s.AssertRead(ballast, WithDataSize(4096))
+}
+
+func TestStore_FlushSemaphore(t *testing.T) {
+	// Set the flush semaphore to 1 for testing
+	defer temporarily(&store_FlushSemaphore, 1)()
+
+	ctx := context.Background()
+	s := newTestStore(t)
+	defer s.Close()
+
+	// Channels to coordinate with the goroutines
+	acquired := make(chan struct{})
+	release := make(chan struct{})
+	errCh := make(chan error)
+
+	// Start a goroutine that will hold the flush lock
+	go func() {
+		// Acquire flush lock explicitly
+		err := s.flushMu.RLock(ctx, &s.closed)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		// Signal we have acquired the lock
+		close(acquired)
+
+		// Wait until the test function indicates we should release the lock
+		<-release
+
+		// Release the lock
+		s.flushMu.RUnlock()
+
+		// Signal we're done without error
+		errCh <- nil
+	}()
+
+	// Wait for the goroutine to acquire the lock
+	<-acquired
+
+	// Start a goroutine that waits for the test to block on the flush semaphore
+	go func() {
+		waitForGoroutine(
+			"(*Writer).Close",
+			"(*rwMutex).RLock",
+		)
+		// Once we detect blocking, signal the first goroutine to release the lock
+		close(release)
+	}()
+
+	// Create a key and try to close a writer, which should block on the flush semaphore
+	key := s.AssertCreate()
+
+	// Wait for the first goroutine to finish without error
+	assert.NoError(t, <-errCh)
+
+	// Read back the data to ensure everything worked
+	s.AssertRead(key)
 }
 
 func TestStore_SwapDifferentBackends(t *testing.T) {
@@ -1202,6 +1299,83 @@ func TestStore_SwapDifferentBackends(t *testing.T) {
 	}
 }
 
+func TestStore_WriteRandomSizes(t *testing.T) {
+	forAllTables(t, testStore_WriteRandomSizes)
+}
+func testStore_WriteRandomSizes(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	defer s.Close()
+
+	data := make([]byte, 1024)
+
+	for i := 0; i < 10; i++ {
+		key := newKey()
+		_, _ = mwc.Rand().Read(data)
+
+		w, err := s.Create(ctx, key, time.Time{})
+		assert.NoError(t, err)
+
+		for buf := data; len(buf) > 0; {
+			n := mwc.Intn(len(buf) + 1)
+			_, err := w.Write(buf[:n])
+			assert.NoError(t, err)
+			buf = buf[n:]
+		}
+
+		assert.Equal(t, w.Size(), len(data))
+		assert.NoError(t, w.Close())
+
+		s.AssertRead(key, WithData(data))
+	}
+}
+
+func TestStore_RewriteMultipleZeroRemovesFullyDeadLogs(t *testing.T) {
+	forAllTables(t, testStore_RewriteMultipleZeroRemovesFullyDeadLogs)
+}
+func testStore_RewriteMultipleZeroRemovesFullyDeadLogs(t *testing.T) {
+	defer temporarily(&compaction_RewriteMultiple, 0)()
+	defer temporarily(&compaction_MaxLogSize, 1024)()
+
+	ctx := context.Background()
+	s := newTestStore(t)
+	defer s.Close()
+
+	getLog := func(key Key) uint64 {
+		t.Helper()
+
+		rec, ok, err := s.tbl.Lookup(ctx, key)
+		assert.NoError(t, err)
+		assert.True(t, ok)
+		return rec.Log
+	}
+
+	// we want to have one log file that is partially dead and one log file that is fully dead. when
+	// we compact, it should rewrite the fully dead log file but not the partially dead one.
+	alive := s.AssertCreate(WithDataSize(512))
+	dead := s.AssertCreate(WithDataSize(512), WithTTL(time.Unix(1, 0)))
+	fullyDead := s.AssertCreate(WithDataSize(512), WithTTL(time.Unix(1, 0)))
+
+	assert.Equal(t, getLog(alive), 1)
+	assert.Equal(t, getLog(dead), 1)
+	assert.Equal(t, getLog(fullyDead), 2)
+
+	// no matter how many times we compact, fully dead should be removed and partially dead should
+	// not be rewritten.
+	for i := 0; i < 5; i++ {
+		s.AssertCompact(nil, time.Time{})
+
+		assert.Equal(t, getLog(alive), 1)
+		s.AssertNotExist(dead)
+		s.AssertNotExist(fullyDead)
+
+		stats := s.Stats()
+		assert.Equal(t, stats.Compactions, i+1)
+		assert.Equal(t, stats.LogsRewritten, 1)
+		assert.Equal(t, stats.DataRewritten, 0)
+	}
+}
+
 //
 // benchmarks
 //
@@ -1227,7 +1401,7 @@ func benchmarkStore(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			s.AssertCreate(WithData(buf))
-			if s.ShouldCompact() {
+			if s.Load() > db_CompactLoad {
 				s.AssertCompact(nil, time.Time{})
 			}
 		}
@@ -1241,7 +1415,7 @@ func benchmarkStore(b *testing.B) {
 
 		for i := uint64(0); i < 1<<lrec; i++ {
 			s.AssertCreate(WithData(nil))
-			if s.ShouldCompact() {
+			if s.Load() > db_CompactLoad {
 				s.AssertCompact(nil, time.Time{})
 			}
 		}
@@ -1267,7 +1441,7 @@ func benchmarkStore(b *testing.B) {
 		s := newTestStore(b)
 		defer s.Close()
 
-		key := s.AssertCreate(WithData(make([]byte, 200*1024)))
+		key := s.AssertCreate(WithDataSize(200 * 1024))
 		rec, ok, err := s.tbl.Lookup(ctx, key)
 		assert.NoError(b, err)
 		assert.True(b, ok)
