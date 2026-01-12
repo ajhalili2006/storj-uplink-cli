@@ -62,15 +62,16 @@ const (
 
 // ServiceDependencies consolidates all database and service dependencies for stripe.NewService.
 type ServiceDependencies struct {
-	DB           DB
-	WalletsDB    storjscan.WalletsDB
-	BillingDB    billing.TransactionsDB
-	ProjectsDB   console.Projects
-	UsersDB      console.Users
-	UsageDB      accounting.ProjectAccounting
-	Analytics    *analytics.Service
-	Emission     *emission.Service
-	Entitlements *entitlements.Service
+	DB                   DB
+	WalletsDB            storjscan.WalletsDB
+	BillingDB            billing.TransactionsDB
+	ProjectsDB           console.Projects
+	UsersDB              console.Users
+	UsageDB              accounting.ProjectAccounting
+	RetentionRemainderDB accounting.RetentionRemainderDB
+	Analytics            *analytics.Service
+	Emission             *emission.Service
+	Entitlements         *entitlements.Service
 }
 
 // PricingConfig consolidates all pricing-related configuration for stripe.NewService.
@@ -99,15 +100,16 @@ type Service struct {
 	log          *zap.Logger
 	stripeClient Client
 
-	db           DB
-	walletsDB    storjscan.WalletsDB
-	billingDB    billing.TransactionsDB
-	projectsDB   console.Projects
-	usersDB      console.Users
-	usageDB      accounting.ProjectAccounting
-	analytics    *analytics.Service
-	emission     *emission.Service
-	entitlements *entitlements.Service
+	db                   DB
+	walletsDB            storjscan.WalletsDB
+	billingDB            billing.TransactionsDB
+	projectsDB           console.Projects
+	usersDB              console.Users
+	usageDB              accounting.ProjectAccounting
+	retentionRemainderDB accounting.RetentionRemainderDB
+	analytics            *analytics.Service
+	emission             *emission.Service
+	entitlements         *entitlements.Service
 
 	config        ServiceConfig
 	stripeConfig  Config
@@ -144,15 +146,16 @@ func NewService(
 		log:          log,
 		stripeClient: stripeClient,
 
-		db:           deps.DB,
-		walletsDB:    deps.WalletsDB,
-		billingDB:    deps.BillingDB,
-		projectsDB:   deps.ProjectsDB,
-		usersDB:      deps.UsersDB,
-		usageDB:      deps.UsageDB,
-		analytics:    deps.Analytics,
-		emission:     deps.Emission,
-		entitlements: deps.Entitlements,
+		db:                   deps.DB,
+		walletsDB:            deps.WalletsDB,
+		billingDB:            deps.BillingDB,
+		projectsDB:           deps.ProjectsDB,
+		usersDB:              deps.UsersDB,
+		usageDB:              deps.UsageDB,
+		retentionRemainderDB: deps.RetentionRemainderDB,
+		analytics:            deps.Analytics,
+		emission:             deps.Emission,
+		entitlements:         deps.Entitlements,
 
 		config:        config,
 		pricingConfig: pricing,
@@ -449,6 +452,18 @@ func (service *Service) InvoiceApplyProjectRecordsGrouped(ctx context.Context, p
 						return
 					}
 				}
+
+				if service.stripeConfig.PopulateMinRetentionInvoiceLineItem {
+					// Mark retention remainder charges as billed for all projects in this batch.
+					for _, r := range records {
+						err = service.retentionRemainderDB.MarkChargesAsBilled(ctx, r.ProjectID, from, to)
+						if err != nil {
+							service.log.Error("failed to mark retention charges as billed",
+								zap.String("project_id", r.ProjectID.String()),
+								zap.Error(err))
+						}
+					}
+				}
 			})
 		}
 	}
@@ -697,12 +712,93 @@ func (service *Service) getAndProcessUsages(
 				MinimumRetentionFeeCents: priceModel.MinimumRetentionFeeCents,
 				SmallObjectFeeSKU:        priceModel.SmallObjectFeeSKU,
 				MinimumRetentionFeeSKU:   priceModel.MinimumRetentionFeeSKU,
+				MinimumRetentionDuration: priceModel.MinimumRetentionDuration,
 				EgressOverageMode:        priceModel.EgressOverageMode,
 				IncludedEgressSKU:        priceModel.IncludedEgressSKU,
 				ProjectUsagePriceModel:   priceModel.ProjectUsagePriceModel,
 				UseGBUnits:               priceModel.UseGBUnits,
 				StorageRemainderBytes:    priceModel.StorageRemainderBytes,
 			}
+		}
+	}
+
+	if !service.stripeConfig.PopulateMinRetentionInvoiceLineItem {
+		return nil
+	}
+
+	// Query deletion remainder charges for this project.
+	options := accounting.GetUnbilledChargesOptions{
+		ProjectID: projectID,
+		From:      from,
+		To:        to,
+		Limit:     service.stripeConfig.RetentionRemainderBatchSize,
+	}
+	deletionCharges, nextToken, err := service.retentionRemainderDB.GetUnbilledCharges(ctx, options)
+	if err != nil {
+		return err
+	}
+
+	for {
+		// Aggregate deletion remainder charges by product ID.
+		for _, charge := range deletionCharges {
+
+			if existingUsage, ok := productUsages[charge.ProductID]; ok {
+				// Add to existing product usage.
+				existingUsage.RetentionRemainder += charge.RemainderByteHours
+				productUsages[charge.ProductID] = existingUsage
+			} else {
+				// Create new product usage entry with just deletion remainder.
+				productUsages[charge.ProductID] = accounting.ProjectUsage{
+					RetentionRemainder: charge.RemainderByteHours,
+				}
+
+				// Initialize product info if not already present.
+				if _, ok := productInfos[charge.ProductID]; !ok {
+					var (
+						productName string
+						storageSKU  string
+						egressSKU   string
+						segmentSKU  string
+					)
+					if product, ok := service.pricingConfig.ProductPriceMap[charge.ProductID]; ok {
+						productName = product.ProductName
+						storageSKU = product.StorageSKU
+						egressSKU = product.EgressSKU
+						segmentSKU = product.SegmentSKU
+					} else {
+						service.log.Error("failed to get product for ID in deletion charges", zap.Int("product_id", int(charge.ProductID)))
+						productName = fmt.Sprintf("Product %d", charge.ProductID)
+					}
+
+					priceModel := service.pricingConfig.ProductPriceMap[charge.ProductID]
+					productInfos[charge.ProductID] = payments.ProductUsagePriceModel{
+						ProductID:                charge.ProductID,
+						ProductName:              productName,
+						StorageSKU:               storageSKU,
+						EgressSKU:                egressSKU,
+						SegmentSKU:               segmentSKU,
+						SmallObjectFeeCents:      priceModel.SmallObjectFeeCents,
+						MinimumRetentionFeeCents: priceModel.MinimumRetentionFeeCents,
+						MinimumRetentionDuration: priceModel.MinimumRetentionDuration,
+						SmallObjectFeeSKU:        priceModel.SmallObjectFeeSKU,
+						MinimumRetentionFeeSKU:   priceModel.MinimumRetentionFeeSKU,
+						EgressOverageMode:        priceModel.EgressOverageMode,
+						IncludedEgressSKU:        priceModel.IncludedEgressSKU,
+						ProjectUsagePriceModel:   priceModel.ProjectUsagePriceModel,
+						UseGBUnits:               priceModel.UseGBUnits,
+					}
+				}
+			}
+		}
+
+		if nextToken == nil {
+			break
+		}
+
+		options.NextToken = nextToken
+		deletionCharges, nextToken, err = service.retentionRemainderDB.GetUnbilledCharges(ctx, options)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -1030,21 +1126,60 @@ func (service *Service) InvoiceItemsFromTotalProjectUsages(productUsages map[int
 
 		if !info.MinimumRetentionFeeCents.IsZero() {
 			minimumRetentionFeeItem := &stripe.InvoiceItemParams{}
-			var minimumRetentionFeeDesc string
-			if info.UseGBUnits {
-				minimumRetentionFeeDesc = prefix + " - Minimum Storage Retention Remainder (GB-Month)"
+			if service.stripeConfig.PopulateMinRetentionInvoiceLineItem {
+				durStr := fmt.Sprintf("%d Days", int(info.MinimumRetentionDuration.Hours())/24)
+				hoursInt := int(info.MinimumRetentionDuration.Hours()) % 24
+				if hoursInt != 0 {
+					durStr = fmt.Sprintf("%s %d Hours", durStr, hoursInt)
+				}
+
+				minimumRetentionFeeDesc := prefix + " - Minimum " + durStr + " Storage Retention Remainder (GB-Month)"
+				if !info.UseGBUnits {
+					minimumRetentionFeeDesc = prefix + " - Minimum " + durStr + " Storage Retention Remainder (MB-Month)"
+				}
+				minimumRetentionFeeItem.Description = stripe.String(minimumRetentionFeeDesc)
+				// Calculate quantity from RetentionRemainder byte-hours.
+				var minimumRetentionFeeQuantity int64
+				if info.UseGBUnits {
+					// New products: convert from byte-hours to GB-Month.
+					retentionRemainderAdjustedMonth := StorageGBMonthDecimal(usage.RetentionRemainder)
+					if service.stripeConfig.RoundUpInvoiceUsage {
+						minimumRetentionFeeQuantity = retentionRemainderAdjustedMonth.Ceil().IntPart()
+						// Ensure at least 1 unit if there's any deletion remainder usage (even if it rounds to 0).
+						if usage.RetentionRemainder > 0 && minimumRetentionFeeQuantity == 0 {
+							minimumRetentionFeeQuantity = 1
+						}
+					} else {
+						minimumRetentionFeeQuantity = retentionRemainderAdjustedMonth.Round(0).IntPart()
+					}
+					// Multiply price by mbToGBConversionFactor to convert from MB cents to GB cents.
+					minimumRetentionFeePrice, _ := info.MinimumRetentionFeeCents.Mul(decimal.NewFromInt(mbToGBConversionFactor)).Float64()
+					minimumRetentionFeeItem.UnitAmountDecimal = stripe.Float64(minimumRetentionFeePrice)
+				} else {
+					// Legacy products: use MB-Month with rounding.
+					deletionRemainderMBMonth := storageMBMonthDecimal(usage.RetentionRemainder)
+					minimumRetentionFeeQuantity = deletionRemainderMBMonth.IntPart()
+					minimumRetentionFeePrice, _ := info.MinimumRetentionFeeCents.Float64()
+					minimumRetentionFeeItem.UnitAmountDecimal = stripe.Float64(minimumRetentionFeePrice)
+				}
+				minimumRetentionFeeItem.Quantity = stripe.Int64(minimumRetentionFeeQuantity)
 			} else {
-				minimumRetentionFeeDesc = prefix + " - Minimum Storage Retention Remainder (MB-Month)"
-			}
-			minimumRetentionFeeItem.Description = stripe.String(minimumRetentionFeeDesc)
-			minimumRetentionFeeItem.Quantity = stripe.Int64(0) // not applied for now.
-			if info.UseGBUnits {
-				// Multiply price by mbToGBConversionFactor to convert from MB cents to GB cents.
-				minimumRetentionFeePrice, _ := info.MinimumRetentionFeeCents.Mul(decimal.NewFromInt(mbToGBConversionFactor)).Float64()
-				minimumRetentionFeeItem.UnitAmountDecimal = stripe.Float64(minimumRetentionFeePrice)
-			} else {
-				minimumRetentionFeePrice, _ := info.MinimumRetentionFeeCents.Float64()
-				minimumRetentionFeeItem.UnitAmountDecimal = stripe.Float64(minimumRetentionFeePrice)
+				var minimumRetentionFeeDesc string
+				if info.UseGBUnits {
+					minimumRetentionFeeDesc = prefix + " - Minimum Storage Retention Remainder (GB-Month)"
+				} else {
+					minimumRetentionFeeDesc = prefix + " - Minimum Storage Retention Remainder (MB-Month)"
+				}
+				minimumRetentionFeeItem.Description = stripe.String(minimumRetentionFeeDesc)
+				minimumRetentionFeeItem.Quantity = stripe.Int64(0) // not applied for now.
+				if info.UseGBUnits {
+					// Multiply price by mbToGBConversionFactor to convert from MB cents to GB cents.
+					minimumRetentionFeePrice, _ := info.MinimumRetentionFeeCents.Mul(decimal.NewFromInt(mbToGBConversionFactor)).Float64()
+					minimumRetentionFeeItem.UnitAmountDecimal = stripe.Float64(minimumRetentionFeePrice)
+				} else {
+					minimumRetentionFeePrice, _ := info.MinimumRetentionFeeCents.Float64()
+					minimumRetentionFeeItem.UnitAmountDecimal = stripe.Float64(minimumRetentionFeePrice)
+				}
 			}
 			if info.MinimumRetentionFeeSKU != "" && service.stripeConfig.SkuEnabled {
 				minimumRetentionFeeItem.AddMetadata("SKU", info.MinimumRetentionFeeSKU)
@@ -2179,6 +2314,11 @@ func (service *Service) getFromToDates(ctx context.Context, userID uuid.UUID, st
 // The result is rounded to the nearest whole number, but returned as Decimal for convenience.
 func storageMBMonthDecimal(storage float64) decimal.Decimal {
 	return decimal.NewFromFloat(storage).Shift(-6).Div(decimal.NewFromInt(hoursPerMonth)).Round(0)
+}
+
+// StorageGBMonthDecimal converts storage usage from Byte-Hours to Gigabyte-Months.
+func StorageGBMonthDecimal(storage float64) decimal.Decimal {
+	return decimal.NewFromFloat(storage).Shift(-6).Div(decimal.NewFromInt(mbToGBConversionFactor)).Div(decimal.NewFromInt(hoursPerMonth))
 }
 
 // egressMBDecimal converts egress usage from bytes to Megabytes

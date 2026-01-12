@@ -1553,3 +1553,121 @@ func generateProjectUsageWithRemainder(ctx context.Context, tb testing.TB, db sa
 	err = db.ProjectAccounting().SaveTallies(ctx, end, tallies)
 	require.NoError(tb, err)
 }
+
+func TestMinimumRetentionInvoicing(t *testing.T) {
+	minRetentionProduct := paymentsconfig.ProductUsagePrice{
+		ID:   4,
+		Name: "Min Retention Product",
+		ProjectUsagePrice: paymentsconfig.ProjectUsagePrice{
+			StorageTB: "10",
+			EgressTB:  "5",
+			Segment:   "1",
+		},
+		MinimumRetentionDuration: "720h", // 30 days
+		MinimumRetentionFee:      "10",   // $10 per TB-month
+		MinimumRetentionFeeSKU:   "min_retention_fee_sku",
+		UseGBUnits:               true,
+	}
+
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: 1, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				config.Payments.StripeCoinPayments.PopulateMinRetentionInvoiceLineItem = true
+				config.Payments.PlacementPriceOverrides.SetMap(map[int]int32{
+					0: 4,
+				})
+				config.Payments.Products.SetMap(map[int32]paymentsconfig.ProductUsagePrice{
+					4: minRetentionProduct,
+				})
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		stripeService := sat.API.Payments.StripeService
+
+		project := planet.Uplinks[0].Projects[0]
+		projectID := project.ID
+		bucketName := "test-bucket"
+
+		now := time.Now()
+
+		sat.Accounting.Tally.Loop.Pause()
+		sat.Accounting.Rollup.Loop.Pause()
+		sat.Accounting.RollupArchive.Loop.Pause()
+
+		period := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC) // Fixed date for consistent testing.
+
+		size := 10 * memory.TB
+		charge := accounting.RetentionRemainderCharge{
+			ProjectID:          projectID,
+			BucketName:         bucketName,
+			DeletedAt:          period,
+			RemainderByteHours: float64(240 * size), // 240 hours of remaining retention for 10 TB
+			ProductID:          minRetentionProduct.ID,
+			Billed:             false,
+		}
+		require.NoError(t, sat.DB.RetentionRemainderCharges().Upsert(ctx, charge))
+
+		charge2 := accounting.RetentionRemainderCharge{
+			ProjectID:          projectID,
+			BucketName:         bucketName,
+			DeletedAt:          period.AddDate(0, 2, 0), // Different period
+			RemainderByteHours: float64(100 * size),     // 100 hours of remaining retention for 10 TB
+			ProductID:          minRetentionProduct.ID,
+			Billed:             false,
+		}
+		require.NoError(t, sat.DB.RetentionRemainderCharges().Upsert(ctx, charge2))
+
+		productUsages := make(map[int32]accounting.ProjectUsage)
+		productInfos := make(map[int32]payments.ProductUsagePriceModel)
+
+		start := time.Date(period.Year(), period.Month(), 1, 0, 0, 0, 0, time.UTC)
+		end := start.AddDate(0, 1, 0)
+
+		record := stripe.ProjectRecord{ProjectID: project.ID, Storage: 1}
+		_, err := stripeService.ProcessRecord(ctx, record, productUsages, productInfos, start, end)
+		require.NoError(t, err)
+
+		invoiceItems := stripeService.InvoiceItemsFromTotalProjectUsages(productUsages, productInfos, period)
+
+		var retentionItem *stripeSDK.InvoiceItemParams
+
+		for _, item := range invoiceItems {
+			desc := *item.Description
+			if strings.Contains(desc, "Storage Retention Remainder") {
+				retentionItem = item
+			}
+		}
+		// Verify retention item exists with correct quantity
+		require.NotNil(t, retentionItem)
+		expectedQuantity := stripe.StorageGBMonthDecimal(charge.RemainderByteHours).Ceil().IntPart()
+		require.Equal(t, expectedQuantity, *retentionItem.Quantity)
+		require.Equal(t, 1.0, *retentionItem.UnitAmountDecimal) // $10/TB = 1.0 cent/GB
+
+		// run the billing process again to bill charge2
+		start = start.AddDate(0, 2, 0)
+		end = start.AddDate(0, 1, 0)
+
+		record = stripe.ProjectRecord{ProjectID: project.ID, Storage: 1}
+		productUsages = make(map[int32]accounting.ProjectUsage)
+		productInfos = make(map[int32]payments.ProductUsagePriceModel)
+		_, err = stripeService.ProcessRecord(ctx, record, productUsages, productInfos, start, end)
+		require.NoError(t, err)
+
+		invoiceItems = stripeService.InvoiceItemsFromTotalProjectUsages(productUsages, productInfos, start)
+
+		retentionItem = nil
+		for _, item := range invoiceItems {
+			desc := *item.Description
+			if strings.Contains(desc, "Storage Retention Remainder") {
+				retentionItem = item
+			}
+		}
+		// Verify retention item exists with correct quantity
+		require.NotNil(t, retentionItem)
+		expectedQuantity = stripe.StorageGBMonthDecimal(charge2.RemainderByteHours).Ceil().IntPart()
+		require.Equal(t, expectedQuantity, *retentionItem.Quantity)
+		require.Equal(t, 1.0, *retentionItem.UnitAmountDecimal) // $10/TB = 1.0 cent/GB
+	})
+}
