@@ -468,6 +468,8 @@ export class ProjectCharge {
         public includedEgress: number = 0,
         public remainderStorage: number = 0,
         public smallObjectFeePrice: number = 0,
+        public retentionRemainder: number = 0,
+        public minimumRetentionFeePrice: number = 0,
     ) { }
 
     /**
@@ -497,8 +499,10 @@ export class ProductCharge extends ProjectCharge {
         includedEgress: number = 0,
         remainderStorage: number = 0,
         smallObjectFeePrice: number = 0,
+        retentionRemainder: number,
+        minimumRetentionFeePrice: number,
     ) {
-        super(since, before, egress, storage, segmentCount, storagePrice, egressPrice, segmentPrice, includedEgress, remainderStorage, smallObjectFeePrice);
+        super(since, before, egress, storage, segmentCount, storagePrice, egressPrice, segmentPrice, includedEgress, remainderStorage, smallObjectFeePrice, retentionRemainder, minimumRetentionFeePrice);
     }
 }
 
@@ -519,6 +523,7 @@ type ProductChargesJSON = {
                 egressOverageMode: boolean;
                 egressDiscountRatio: number;
                 storageRemainderBytes: number;
+                minimumRetentionDuration: number;
             };
         };
     }
@@ -693,6 +698,9 @@ export class ProductCharges {
                     remainderStorage,
                     smallObjectFeePrice,
                     storageRemainderBytes,
+                    retentionRemainder,
+                    minimumRetentionFeePrice,
+                    minimumRetentionDuration,
                 } = chargeJSON;
 
                 const pc = new ProductCharge(
@@ -707,6 +715,7 @@ export class ProductCharges {
                         egressOverageMode,
                         egressDiscountRatio,
                         storageRemainderBytes,
+                        minimumRetentionDuration,
                     ),
                     new Date(sinceStr),
                     new Date(beforeStr),
@@ -719,6 +728,8 @@ export class ProductCharges {
                     includedEgress,
                     remainderStorage,
                     smallObjectFeePrice,
+                    retentionRemainder,
+                    minimumRetentionFeePrice,
                 );
 
                 charges.set(projectID, productIDNum, pc);
@@ -865,6 +876,7 @@ export class UsagePriceModel {
         public readonly egressOverageMode: boolean = false,
         public readonly egressDiscountRatio: number = 0,
         public readonly storageRemainderBytes: number = 0,
+        public readonly minimumRetentionDuration: number = 0,
     ) { }
 }
 

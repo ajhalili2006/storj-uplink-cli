@@ -140,16 +140,16 @@
 
                                 <tr v-if="parseFloat(charge.priceModel.minimumRetentionFeeCents) > 0">
                                     <td>
-                                        <p>Minimum Storage Retention Remainder</p>
+                                        <p>Minimum {{ getMinimumRetentionDuration(charge) }} Storage Retention Remainder</p>
                                     </td>
                                     <td class="d-none d-md-table-cell">
                                         <p>{{ getPeriod(charge) }}</p>
                                     </td>
                                     <td class="d-none d-sm-table-cell">
-                                        <p>MB-month</p>
+                                        <p>{{ getRetentionRemainderFormatted(charge) }} Gigabyte-month</p>
                                     </td>
                                     <td class="text-right">
-                                        <p>$0</p>
+                                        <p>{{ centsToDollars(charge.minimumRetentionFeePrice) }}</p>
                                     </td>
                                 </tr>
                             </tbody>
@@ -187,6 +187,7 @@ import { Size } from '@/utils/bytesSize';
 import { SHORT_MONTHS_NAMES } from '@/utils/constants/date';
 import { useBillingStore } from '@/store/modules/billingStore';
 import { useProjectsStore } from '@/store/modules/projectsStore';
+import { Duration } from '@/utils/time';
 
 import DetailedUsageReportDialog from '@/components/dialogs/DetailedUsageReportDialog.vue';
 import IconProjectTonal from '@/components/icons/IconProjectTonal.vue';
@@ -281,6 +282,25 @@ function getStorageFormatted(charge: ProjectCharge): string {
  */
 function getStorageRemainderFormatted(charge: ProjectCharge): string {
     return (charge.remainderStorage / HOURS_IN_MONTH / BYTES_IN_GB).toFixed(2);
+}
+
+/**
+ * Returns formatted retention remainder used in GB x month dimension.
+ * It is originally in byte-hours.
+ */
+function getRetentionRemainderFormatted(charge: ProductCharge): string {
+    return (charge.retentionRemainder / HOURS_IN_MONTH / BYTES_IN_GB).toFixed(2);
+}
+
+function getMinimumRetentionDuration(charge: ProductCharge): string {
+    const dur = new Duration(charge.priceModel.minimumRetentionDuration);
+    const days = Math.floor(dur.fullHours / 24);
+    const hours = dur.fullHours % 24;
+    let durStr = `${days} Days`;
+    if (hours !== 0) {
+        durStr = `${durStr} ${hours} Hours`;
+    }
+    return durStr;
 }
 
 /**
