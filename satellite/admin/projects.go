@@ -1260,16 +1260,9 @@ func (s *Service) GetProjectMembers(ctx context.Context, publicID uuid.UUID, sea
 		ProjectMembers: make([]ProjectMember, 0, len(queried.ProjectMembers)),
 	}
 	for _, pm := range queried.ProjectMembers {
-		user, err := s.consoleDB.Users().Get(ctx, pm.MemberID)
-		if err != nil {
-			return nil, api.HTTPError{
-				Status: http.StatusInternalServerError,
-				Err:    Error.Wrap(err),
-			}
-		}
 		pmp.ProjectMembers = append(pmp.ProjectMembers, ProjectMember{
-			UserID:    user.ID,
-			Email:     user.Email,
+			UserID:    pm.MemberID,
+			Email:     pm.Email,
 			Role:      pm.Role,
 			CreatedAt: pm.CreatedAt,
 		})
