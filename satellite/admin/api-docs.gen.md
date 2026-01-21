@@ -295,6 +295,7 @@ Gets user by email address
 			name: string
 			active: boolean
 			hasManagedPassphrase: boolean
+			ownerID: string // UUID formatted as `00000000-0000-0000-0000-000000000000`
 			bandwidthLimit: number
 			userSetBandwidthLimit: number
 			bandwidthUsed: number
@@ -359,6 +360,7 @@ Gets user by ID
 			name: string
 			active: boolean
 			hasManagedPassphrase: boolean
+			ownerID: string // UUID formatted as `00000000-0000-0000-0000-000000000000`
 			bandwidthLimit: number
 			userSetBandwidthLimit: number
 			bandwidthUsed: number
@@ -443,6 +445,7 @@ Updates user info by ID. Limit updates will cascade to all projects of the user.
 			name: string
 			active: boolean
 			hasManagedPassphrase: boolean
+			ownerID: string // UUID formatted as `00000000-0000-0000-0000-000000000000`
 			bandwidthLimit: number
 			userSetBandwidthLimit: number
 			bandwidthUsed: number
@@ -517,6 +520,7 @@ Updates user's upgrade time by ID
 			name: string
 			active: boolean
 			hasManagedPassphrase: boolean
+			ownerID: string // UUID formatted as `00000000-0000-0000-0000-000000000000`
 			bandwidthLimit: number
 			userSetBandwidthLimit: number
 			bandwidthUsed: number
@@ -591,6 +595,7 @@ Disables user by ID. User can only be disabled if they have no active projects a
 			name: string
 			active: boolean
 			hasManagedPassphrase: boolean
+			ownerID: string // UUID formatted as `00000000-0000-0000-0000-000000000000`
 			bandwidthLimit: number
 			userSetBandwidthLimit: number
 			bandwidthUsed: number

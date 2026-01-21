@@ -373,6 +373,7 @@ export class UserProject {
     name: string;
     active: boolean;
     hasManagedPassphrase: boolean;
+    ownerID: UUID;
     bandwidthLimit: number;
     userSetBandwidthLimit: number | null;
     bandwidthUsed: number;

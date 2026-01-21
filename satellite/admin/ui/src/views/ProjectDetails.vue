@@ -42,7 +42,8 @@
                     <v-icon :icon="ChevronDown" />
                 </template>
                 <ProjectActionsMenu
-                    :project-id="project.id" :owner="project.owner"
+                    :project-id="project.id"
+                    :owner-id="project.owner.id"
                     :active="project.status?.value === UserStatus.Active"
                     @update-limits="onUpdateLimitsClicked"
                     @update="updateDialog = true"
