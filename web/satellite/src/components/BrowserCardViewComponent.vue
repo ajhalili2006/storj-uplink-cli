@@ -3,7 +3,7 @@
 
 <template>
     <v-card class="pa-4 mb-6" :loading="isFetching">
-        <v-row v-if="!isAltPagination" align="center">
+        <v-row v-if="!useServerSidePagination" align="center">
             <v-col cols="12" sm class="flex-grow-1 flex-sm-grow-1">
                 <v-text-field
                     v-model="search"
@@ -64,7 +64,7 @@
         <v-data-iterator
             :page="cursor.page"
             :items-per-page="cursor.limit"
-            :items="isAltPagination ? allFiles : browserFiles"
+            :items="useServerSidePagination ? allFiles : browserFiles"
             :search="search"
             :sort-by="sortBy"
             :loading="isFetching"
@@ -122,7 +122,10 @@
 
                     <v-spacer />
 
-                    <span v-if="!isAltPagination" class="mr-4 text-caption text-medium-emphasis">
+                    <span v-if="obStore.isSimplifiedPagination" class="mr-4 text-body-2">
+                        {{ pageDisplayText }}
+                    </span>
+                    <span v-else-if="!obStore.isAltPagination" class="mr-4 text-caption text-medium-emphasis">
                         Page {{ cursor.page }} of {{ lastPage }}
                     </span>
                     <v-btn
@@ -132,7 +135,7 @@
                         variant="text"
                         color="default"
                         :disabled="cursor.page <= 1"
-                        @click="() => isAltPagination ? onPreviousPageClicked() : onPageChange(cursor.page - 1)"
+                        @click="() => useServerSidePagination ? onPreviousPageClicked() : onPageChange(cursor.page - 1)"
                     />
                     <v-btn
                         :icon="ChevronRight"
@@ -141,8 +144,8 @@
                         variant="text"
                         color="default"
                         class="ml-2"
-                        :disabled="isAltPagination ? !hasNextPage : cursor.page === lastPage"
-                        @click="() => isAltPagination ? onNextPageClicked() : onPageChange(cursor.page + 1)"
+                        :disabled="useServerSidePagination ? !hasNextPage : cursor.page === lastPage"
+                        @click="() => useServerSidePagination ? onNextPageClicked() : onPageChange(cursor.page + 1)"
                     />
                 </div>
             </template>
@@ -198,7 +201,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeMount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import {
     VBtn,
@@ -244,6 +247,7 @@ import { SortItem } from '@/types/common';
 import { usePreCheck } from '@/composables/usePreCheck';
 import { useLoading } from '@/composables/useLoading';
 import { useConfigStore } from '@/store/modules/configStore';
+import { DEFAULT_PAGE_LIMIT } from '@/types/pagination';
 
 import FilePreviewDialog from '@/components/dialogs/FilePreviewDialog.vue';
 import DeleteFileDialog from '@/components/dialogs/DeleteFileDialog.vue';
@@ -305,6 +309,7 @@ const pageSizes = [
     { title: '24', value: 24 },
     { title: '36', value: 36 },
     { title: '144', value: 144 },
+    { title: '500', value: 500 },
 ];
 const collator = new Intl.Collator('en', { sensitivity: 'case' });
 
@@ -319,18 +324,35 @@ const filesToDelete = computed<BrowserObject[]>(() => {
 });
 
 /**
- * Indicates if alternative pagination has next page.
+ * Indicates if either alt or simplified pagination should be used (both disable search/sort).
+ */
+const useServerSidePagination = computed(() => obStore.isAltPagination || obStore.isSimplifiedPagination);
+
+/**
+ * Indicates if there is a next page.
  */
 const hasNextPage = computed<boolean>(() => {
+    if (obStore.isSimplifiedPagination) {
+        return obStore.state.pageTokens[cursor.value.page] !== undefined;
+    }
+
     const nextToken = obStore.state.continuationTokens.get(cursor.value.page + 1);
 
     return nextToken !== undefined;
 });
 
 /**
- * Indicates if alternative pagination should be used.
+ * Returns the page display text for simplified pagination (e.g., "Page 2 of 2+").
  */
-const isAltPagination = computed(() => obStore.isAltPagination);
+const pageDisplayText = computed<string>(() => {
+    if (!obStore.isSimplifiedPagination) return '';
+
+    const currentPage = cursor.value.page;
+    const knownPages = obStore.state.pageTokens.length;
+    const hasMore = hasNextPage.value;
+
+    return `Page ${currentPage} of ${knownPages}${hasMore ? '+' : ''}`;
+});
 
 /**
  * Returns object preview URLs cache from store.
@@ -380,7 +402,7 @@ const isBucketVersioned = computed<boolean>(() => {
 const allFiles = computed<BrowserObjectWrapper[]>(() => {
     if (props.forceEmpty) return [];
 
-    const objects = isAltPagination.value ? obStore.sortedFiles : obStore.displayedObjects;
+    const objects = useServerSidePagination.value ? obStore.sortedFiles : obStore.displayedObjects;
 
     return objects.map<BrowserObjectWrapper>(file => {
         const lowerName = file.Key.toLowerCase();
@@ -399,7 +421,7 @@ const allFiles = computed<BrowserObjectWrapper[]>(() => {
  * Returns every file under the current path that matchs the search query.
  */
 const filteredFiles = computed<BrowserObjectWrapper[]>(() => {
-    if (isAltPagination.value) return [];
+    if (useServerSidePagination.value) return [];
     if (!search.value) return allFiles.value;
     const searchLower = search.value.toLowerCase();
     return allFiles.value.filter(file => file.lowerName.includes(searchLower));
@@ -414,7 +436,7 @@ const sortBy = computed<SortItem[]>(() => [{ key: sortKey.value, order: sortOrde
  * Returns the files to be displayed in the browser.
  */
 const browserFiles = computed<BrowserObjectWrapper[]>(() => {
-    if (isAltPagination.value) return [];
+    if (useServerSidePagination.value) return [];
 
     const files = [...filteredFiles.value];
 
@@ -466,7 +488,7 @@ function onNextPageClicked(): void {
  * Handles page change event.
  */
 function onPageChange(page: number): void {
-    if (isAltPagination.value || page < 1 || page > lastPage.value) return;
+    if (useServerSidePagination.value || page < 1 || page > lastPage.value) return;
 
     const path = filePath.value ? filePath.value + '/' : '';
     routePageCache.set(path, page);
@@ -494,7 +516,11 @@ function onPageChange(page: number): void {
  * Handles items per page change event.
  */
 function onLimitChange(newLimit: number): void {
-    if (isAltPagination.value) {
+    if (obStore.isSimplifiedPagination) {
+        obStore.setCursor({ page: 1, limit: newLimit });
+        obStore.clearPageTokens();
+        fetchFiles();
+    } else if (obStore.isAltPagination) {
         obStore.setCursor({ page: 1, limit: newLimit });
         obStore.clearTokens();
         fetchFiles();
@@ -569,7 +595,10 @@ async function fetchFiles(page = 1, saveNextToken = true): Promise<void> {
     try {
         const path = filePath.value ? filePath.value + '/' : '';
 
-        if (isAltPagination.value) {
+        if (obStore.isSimplifiedPagination) {
+            await obStore.listSimplified(path, page, saveNextToken);
+            selected.value = [];
+        } else if (obStore.isAltPagination) {
             await obStore.listCustom(path, page, saveNextToken);
             selected.value = [];
         } else {
@@ -727,7 +756,16 @@ obStore.$onAction(({ name, after }) => {
 });
 
 watch(filePath, () => {
+    // Ensure cursor has valid page size for card view before fetching
+    const validSizes = pageSizes.map(s => s.value);
+    if (!validSizes.includes(cursor.value.limit)) {
+        obStore.setCursor({ page: 1, limit: pageSizes[0].value });
+    }
+
     obStore.clearTokens();
+    if (obStore.isSimplifiedPagination) {
+        obStore.clearPageTokens();
+    }
     fetchFiles();
 }, { immediate: true });
 watch(() => props.forceEmpty, v => !v && fetchFiles());
@@ -745,8 +783,8 @@ watch(allFiles, async (value, oldValue) => {
     }
 }, { immediate: true });
 
-onBeforeMount(() => {
-    obStore.setCursor({ page: 1, limit: pageSizes[0].value });
+onBeforeUnmount(() => {
+    obStore.setCursor({ page: 1, limit: DEFAULT_PAGE_LIMIT });
 });
 
 defineExpose({

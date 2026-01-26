@@ -74,6 +74,7 @@ export class FrontendConfig {
     noLimitsUiEnabled: boolean;
     altObjBrowserPagingEnabled: boolean;
     altObjBrowserPagingThreshold: number;
+    simplifiedObjBrowserPagingEnabled: boolean;
     domainsPageEnabled: boolean;
     activeSessionsViewEnabled: boolean;
     versioningUIEnabled: boolean;
