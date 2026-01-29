@@ -128,14 +128,15 @@ func (s *SharedDisk) DiskSpace(ctx context.Context) (_ DiskSpace, err error) {
 	}
 
 	diskSpace := DiskSpace{
-		Total:         storageStatus.DiskTotal,
-		Allocated:     allocated,
-		UsedForPieces: usedForPieces + hashSpaceUsage.UsedForPieces,
-		UsedForTrash:  usedForTrash + hashSpaceUsage.UsedForTrash,
-		Free:          storageStatus.DiskFree,
-		Available:     available,
-		Overused:      overused,
-		Used:          usedForPieces + usedForTrash + hashSpaceUsage.UsedTotal,
+		Total:           storageStatus.DiskTotal,
+		Allocated:       allocated,
+		UsedForPieces:   usedForPieces + hashSpaceUsage.UsedForPieces,
+		UsedForTrash:    usedForTrash + hashSpaceUsage.UsedForTrash,
+		Free:            storageStatus.DiskFree,
+		Available:       available,
+		Overused:        overused,
+		Used:            usedForPieces + usedForTrash + hashSpaceUsage.UsedTotal,
+		UsedReclaimable: hashSpaceUsage.UsedReclaimable,
 	}
 
 	mon.IntVal("allocated_space").Observe(diskSpace.Allocated)
