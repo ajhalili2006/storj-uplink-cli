@@ -415,7 +415,7 @@ func TestSsoUserLoginWithPassword(t *testing.T) {
 		}, 1)
 		require.NoError(t, err)
 
-		require.NoError(t, satellite.API.Console.Service.UpdateExternalID(ctx, user, "test:1234"))
+		require.NoError(t, satellite.API.Console.Service.UpdateExternalID(ctx, user, "fakeProvider:1234"))
 
 		login := func(expectedCode int) {
 			body := console.AuthUser{
@@ -509,7 +509,7 @@ func TestSsoUserForgotPassword(t *testing.T) {
 		}, 1)
 		require.NoError(t, err)
 
-		require.NoError(t, satellite.API.Console.Service.UpdateExternalID(ctx, user, "test:1234"))
+		require.NoError(t, satellite.API.Console.Service.UpdateExternalID(ctx, user, "fakeProvider:1234"))
 
 		body := console.AuthUser{
 			Email:    user.Email,
@@ -1701,6 +1701,78 @@ func TestSsoFlow(t *testing.T) {
 
 		// getting the sso url for an email that doesn't match the provider should fail
 		getSsoURL("another@who.test", http.StatusNotFound)
+	})
+}
+
+func TestGeneralSsoLinksExistingUser(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				config.SSO.Enabled = true
+				config.SSO.MockSso = true
+				config.SSO.MockEmail = "existing@mail.test"
+				config.Console.RateLimit.Burst = 50
+				config.SSO.OidcProviderInfos = sso.OidcProviderInfos{
+					Values: map[string]sso.OidcProviderInfo{
+						"general": {},
+					},
+				}
+				config.SSO.GeneralProviders = sso.GeneralProviders{Values: []string{"general"}}
+				config.SSO.EmailProviderMappings = sso.EmailProviderMappings{}
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+
+		user, err := sat.AddUser(ctx, console.CreateUser{
+			FullName: "Existing User",
+			Email:    "existing@mail.test",
+		}, 1)
+		require.NoError(t, err)
+
+		login := func(expectedCode int) {
+			body := console.AuthUser{
+				Email:    user.Email,
+				Password: user.FullName,
+			}
+			bodyBytes, err := json.Marshal(body)
+			require.NoError(t, err)
+
+			endpoint := sat.ConsoleURL() + "/api/v0/auth/token"
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(bodyBytes))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+
+			result, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			require.Equal(t, expectedCode, result.StatusCode)
+			require.NoError(t, result.Body.Close())
+		}
+
+		// Password login works before linking.
+		login(http.StatusOK)
+
+		jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: nil})
+		require.NoError(t, err)
+		client := &http.Client{Jar: jar}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, sat.ConsoleURL()+"/sso/general", nil)
+		require.NoError(t, err)
+
+		result, err := client.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, sat.ConsoleURL()+"/", result.Request.URL.String())
+		require.NoError(t, result.Body.Close())
+
+		linkedUser, err := sat.API.DB.Console().Users().GetByEmailAndTenant(ctx, user.Email, nil)
+		require.NoError(t, err)
+		require.Equal(t, user.ID, linkedUser.ID)
+		require.NotNil(t, linkedUser.ExternalID)
+		require.Equal(t, "general:existing@mail.test", *linkedUser.ExternalID)
+
+		// After linking, password login is restricted.
+		login(http.StatusForbidden)
 	})
 }
 

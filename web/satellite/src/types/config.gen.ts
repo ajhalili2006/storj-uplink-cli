@@ -81,6 +81,8 @@ export class FrontendConfig {
     objectLockUIEnabled: boolean;
     valdiSignUpURL: string;
     ssoEnabled: boolean;
+    generalSsoEnabled: boolean;
+    generalSsoProviders: string[] | null;
     selfServePlacementSelectEnabled: boolean;
     csrfToken: string;
     billingStripeCheckoutEnabled: boolean;

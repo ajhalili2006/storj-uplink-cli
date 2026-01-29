@@ -212,6 +212,7 @@ type Server struct {
 
 	entitlementsEnabled   bool
 	ssoEnabled            bool
+	ssoService            *sso.Service
 	productPriceSummaries []string
 }
 
@@ -248,6 +249,7 @@ func NewServer(logger *zap.Logger, config Config, service *console.Service, cons
 		ghostSessionEmailSent:           make(map[uuid.UUID]time.Time),
 		entitlementsEnabled:             entitlementsEnabled,
 		ssoEnabled:                      ssoEnabled,
+		ssoService:                      ssoService,
 		productPriceSummaries:           pps,
 	}
 
@@ -1099,6 +1101,19 @@ func (server *Server) frontendConfigHandler(w http.ResponseWriter, r *http.Reque
 		newPricingStartDate = &date
 	}
 
+	var generalSsoProviders []string
+	generalSsoEnabled := false
+	if server.ssoEnabled && server.ssoService != nil {
+		for _, p := range server.ssoService.GeneralProviders() {
+			if server.ssoService.IsProviderConfigured(p) {
+				generalSsoProviders = append(generalSsoProviders, p)
+			}
+		}
+		if len(generalSsoProviders) > 0 {
+			generalSsoEnabled = true
+		}
+	}
+
 	cfg := FrontendConfig{
 		ExternalAddress:                   server.getExternalAddress(ctx),
 		SatelliteName:                     server.config.SatelliteName,
@@ -1164,6 +1179,8 @@ func (server *Server) frontendConfigHandler(w http.ResponseWriter, r *http.Reque
 		ObjectLockUIEnabled:               server.config.ObjectLockUIEnabled,
 		ValdiSignUpURL:                    server.config.ValdiSignUpURL,
 		SsoEnabled:                        server.ssoEnabled,
+		GeneralSsoEnabled:                 generalSsoEnabled,
+		GeneralSsoProviders:               generalSsoProviders,
 		SelfServePlacementSelectEnabled:   server.config.Placement.SelfServeEnabled,
 		CSRFToken:                         csrfToken,
 		BillingStripeCheckoutEnabled:      server.config.BillingStripeCheckoutEnabled,

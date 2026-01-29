@@ -78,6 +78,8 @@ type FrontendConfig struct {
 	ObjectLockUIEnabled               bool                        `json:"objectLockUIEnabled"`
 	ValdiSignUpURL                    string                      `json:"valdiSignUpURL"`
 	SsoEnabled                        bool                        `json:"ssoEnabled"`
+	GeneralSsoEnabled                 bool                        `json:"generalSsoEnabled"`
+	GeneralSsoProviders               []string                    `json:"generalSsoProviders"`
 	SelfServePlacementSelectEnabled   bool                        `json:"selfServePlacementSelectEnabled"`
 	CSRFToken                         string                      `json:"csrfToken"`
 	BillingStripeCheckoutEnabled      bool                        `json:"billingStripeCheckoutEnabled"`

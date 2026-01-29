@@ -183,6 +183,7 @@ func (a *Auth) AuthenticateSso(w http.ResponseWriter, r *http.Request) {
 	ssoFailedAddr := strings.TrimSuffix(a.getExternalAddress(ctx), "/") + "/login?sso_failed=true"
 
 	provider := mux.Vars(r)["provider"]
+	isGeneralProvider := a.ssoService.IsGeneralProvider(provider)
 
 	stateCookie, err := r.Cookie(a.cookieAuth.GetSSOStateCookieName())
 	if err != nil {
@@ -190,11 +191,16 @@ func (a *Auth) AuthenticateSso(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, ssoFailedAddr, http.StatusPermanentRedirect)
 		return
 	}
+	emailToken := ""
 	emailTokenCookie, err := r.Cookie(a.cookieAuth.GetSSOEmailTokenCookieName())
 	if err != nil {
-		a.log.Error("Error verifying SSO auth", zap.Error(console.ErrValidation.New("missing email token cookie")))
-		http.Redirect(w, r, ssoFailedAddr, http.StatusPermanentRedirect)
-		return
+		if !isGeneralProvider {
+			a.log.Error("Error verifying SSO auth", zap.Error(console.ErrValidation.New("missing email token cookie")))
+			http.Redirect(w, r, ssoFailedAddr, http.StatusPermanentRedirect)
+			return
+		}
+	} else {
+		emailToken = emailTokenCookie.Value
 	}
 
 	ssoState := r.URL.Query().Get("state")
@@ -224,7 +230,7 @@ func (a *Auth) AuthenticateSso(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, err := a.ssoService.VerifySso(ctx, provider, emailTokenCookie.Value, code)
+	claims, err := a.ssoService.VerifySso(ctx, provider, emailToken, code)
 	if err != nil {
 		a.log.Error("Error verifying SSO auth", zap.Error(err))
 		http.Redirect(w, r, ssoFailedAddr, http.StatusPermanentRedirect)
@@ -305,6 +311,8 @@ func (a *Auth) BeginSsoFlow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	provider := mux.Vars(r)["provider"]
+	isGeneralProvider := a.ssoService.IsGeneralProvider(provider)
+
 	oidcSetup := a.ssoService.GetOidcSetupByProvider(ctx, provider)
 	if oidcSetup == nil {
 		a.log.Error("invalid provider "+provider, zap.Error(console.ErrValidation.New("invalid provider")))
@@ -313,17 +321,20 @@ func (a *Auth) BeginSsoFlow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	email := r.URL.Query().Get("email")
-	if email == "" {
+	if email == "" && !isGeneralProvider {
 		a.log.Error("email is required for SSO flow", zap.Error(console.ErrValidation.New("email is required")))
 		http.Redirect(w, r, ssoFailedAddr, http.StatusPermanentRedirect)
 		return
 	}
 
-	emailToken, err := a.ssoService.GetSsoEmailToken(email)
-	if err != nil {
-		a.log.Error("failed to get security token", zap.Error(err))
-		http.Redirect(w, r, ssoFailedAddr, http.StatusPermanentRedirect)
-		return
+	emailToken := ""
+	if email != "" {
+		emailToken, err = a.ssoService.GetSsoEmailToken(email)
+		if err != nil {
+			a.log.Error("failed to get security token", zap.Error(err))
+			http.Redirect(w, r, ssoFailedAddr, http.StatusPermanentRedirect)
+			return
+		}
 	}
 
 	state, err := a.csrfService.GenerateSecurityToken()
@@ -1925,7 +1936,7 @@ func (a *Auth) getUserErrorMessage(err error) string {
 		return "The MFA passcode is not valid or has expired"
 	case console.ErrMFARecoveryCode.Has(err):
 		return "The MFA recovery code is not valid or has been previously used"
-	case console.ErrLoginCredentials.Has(err):
+	case console.ErrLoginCredentials.Has(err), console.ErrSsoUserRestricted.Has(err):
 		return "Your login credentials are incorrect, please try again"
 	case console.ErrLoginRestricted.Has(err):
 		return "You can't be authenticated. Please contact support"

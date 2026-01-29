@@ -1946,6 +1946,9 @@ server.private-address: 127.0.0.1:7778
 # whether SSO is enabled.
 # sso.enabled: false
 
+# semicolon-separated provider names for general SSO (opt-in, no email mapping). Must exist in oidc-provider-infos.
+# sso.general-providers: ""
+
 # semicolon-separated provider:client-id,client-secret,provider-url.
 # sso.oidc-provider-infos: ""
 

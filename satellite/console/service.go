@@ -1667,8 +1667,19 @@ func (s *Service) ShouldRequireSsoByUser(user *User) bool {
 	if !s.ssoEnabled {
 		return false
 	}
+	if user.ExternalID == nil || *user.ExternalID == "" {
+		return false
+	}
+	parts := strings.SplitN(*user.ExternalID, ":", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		return false
+	}
+	provider := parts[0]
+	if s.ssoService != nil && s.ssoService.IsGeneralProvider(provider) {
+		return true
+	}
 	prov := s.ssoService.GetProviderByEmail(user.Email)
-	return user.ExternalID != nil && *user.ExternalID != "" && prov != ""
+	return prov != "" && prov == provider
 }
 
 // CreateSsoUser creates a user that has been authenticated by SSO provider.
