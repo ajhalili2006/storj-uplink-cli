@@ -10,7 +10,6 @@ import (
 	"hash"
 	"io"
 	"sort"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,6 +28,7 @@ import (
 	"storj.io/storj/satellite/audit"
 	"storj.io/storj/satellite/metabase"
 	"storj.io/storj/satellite/overlay"
+	"storj.io/storj/shared/sync/kofn"
 	"storj.io/uplink/private/eestream"
 	"storj.io/uplink/private/piecestore"
 )
@@ -105,7 +105,6 @@ func (ec *ECRepairer) Get(ctx context.Context, log *zap.Logger, limits []*pb.Add
 	}
 
 	nonNilLimits := nonNilCount(limits)
-
 	if nonNilLimits < es.RequiredCount()+ec.minFailures {
 		return nil, FetchResultReport{}, Error.New("number of non-nil limits (%d) is less than requested result count (%d)", nonNilCount(limits), es.RequiredCount()+ec.minFailures)
 	}
@@ -114,183 +113,75 @@ func (ec *ECRepairer) Get(ctx context.Context, log *zap.Logger, limits []*pb.Add
 
 	pieceSize := eestream.CalcPieceSize(dataSize, es)
 
-	errorCount := 0
-	var successfulPieces, inProgress int
-	unusedLimits := nonNilLimits
+	successes, failures := kofn.Collect(
+		ctx,
+		kofn.Config{
+			// Allow more concurrent downloads than required for completion.
+			Concurrency:       es.RequiredCount() + ec.downloadLongTail,
+			RequiredSuccesses: es.RequiredCount(),
+			RequiredFailures:  ec.minFailures,
+		},
+		limits,
+		func(limit *pb.AddressedOrderLimit) bool { return limit == nil },
+		func(ctx context.Context, index int, limit *pb.AddressedOrderLimit) (io.ReadCloser, error) {
+			return ec.downloadPiece(ctx, log, index, limit, cachedNodesInfo, privateKey, pieceSize)
+		},
+	)
+
+	// Build pieceReaders map and FetchResultReport from racing results
 	pieceReaders := make(map[int]io.ReadCloser)
 	var pieces FetchResultReport
 
-	// Allow more concurrent downloads than required for racing
-	downloadConcurrency := min(es.RequiredCount()+ec.downloadLongTail, nonNilLimits)
-	limiter := sync2.NewLimiter(downloadConcurrency)
-	cond := sync.NewCond(&sync.Mutex{})
-
-	// Track download contexts for cancellation
-	downloadCtxs := make(map[int]context.CancelFunc)
-
-	for currentLimitIndex, limit := range limits {
-		if limit == nil {
-			continue
-		}
-
-		currentLimitIndex, limit := currentLimitIndex, limit
-		limiter.Go(ctx, func() {
-			cond.L.Lock()
-			defer cond.Signal()
-			defer cond.L.Unlock()
-
-			for {
-				if successfulPieces >= es.RequiredCount() && errorCount >= ec.minFailures {
-					// already downloaded required number of pieces
-
-					// Cancel all remaining downloads
-					for _, cancelFunc := range downloadCtxs {
-						cancelFunc()
-					}
-					cond.Broadcast()
-					return
-				}
-				if successfulPieces+inProgress+unusedLimits < es.RequiredCount() || errorCount+inProgress+unusedLimits < ec.minFailures {
-					// not enough available limits left to get required number of pieces
-					cond.Broadcast()
-					return
-				}
-
-				if successfulPieces+inProgress >= es.RequiredCount() && errorCount+inProgress >= ec.minFailures {
-					// we know that inProgress > 0 here, since we didn't return on the
-					// "successfulPieces >= es.RequiredCount() && errorCount >= ec.minFailures" check earlier.
-					// There may be enough downloads in progress to meet all of our needs, so we won't
-					// start any more immediately. Instead, wait until all needs are met (in which case
-					// cond.Broadcast() will be called) or until one of the inProgress workers exits
-					// (in which case cond.Signal() will be called, waking up one waiter) so we can
-					// reevaluate the situation.
-					cond.Wait()
-					continue
-				}
-
-				unusedLimits--
-				inProgress++
-
-				// Create a cancellable context for this download
-				var downloadCtx context.Context
-				var downloadCancel context.CancelFunc
-				downloadCtx, downloadCancel = context.WithCancel(ctx)
-				downloadCtxs[currentLimitIndex] = downloadCancel
-
-				cond.L.Unlock()
-
-				info := cachedNodesInfo[limit.GetLimit().StorageNodeId]
-				address := limit.GetStorageNodeAddress().GetAddress()
-				var triedLastIPPort bool
-				if info.LastIPPort != "" && info.LastIPPort != address {
-					address = info.LastIPPort
-					triedLastIPPort = true
-				}
-
-				log.Debug("attempting to fetch piece for repair",
-					zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
-					zap.Stringer("piece_id", limit.Limit.PieceId),
-					zap.Int("piece_index", currentLimitIndex),
-					zap.String("address", limit.GetStorageNodeAddress().Address),
-					zap.String("last_ip_port", info.LastIPPort),
-					zap.Binary("serial", limit.Limit.SerialNumber[:]))
-
-				pieceReadCloser, _, _, err := ec.downloadAndVerifyPiece(downloadCtx, limit, address, privateKey, "", pieceSize)
-				// if piecestore dial with last ip:port failed try again with node address
-				if triedLastIPPort && ErrDialFailed.Has(err) {
-					if pieceReadCloser != nil {
-						_ = pieceReadCloser.Close()
-					}
-					log.Info("repair get failed; retrying with specified hostname", zap.Error(err), zap.String("last_ip_port", info.LastIPPort), zap.String("hostname", limit.GetStorageNodeAddress().GetAddress()))
-					pieceReadCloser, _, _, err = ec.downloadAndVerifyPiece(downloadCtx, limit, limit.GetStorageNodeAddress().GetAddress(), privateKey, "", pieceSize)
-				}
-
-				downloadCancel()
-
-				cond.L.Lock()
-				inProgress--
-				piece := metabase.Piece{
-					Number:      uint16(currentLimitIndex),
-					StorageNode: limit.GetLimit().StorageNodeId,
-				}
-
-				if err != nil {
-					if pieceReadCloser != nil {
-						_ = pieceReadCloser.Close()
-					}
-
-					// If download was canceled due to racing (we already have enough pieces), just return
-					if errors.Is(err, context.Canceled) && downloadCtx.Err() != nil {
-						log.Debug("Download canceled due to racing",
-							zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
-							zap.Stringer("piece_id", limit.Limit.PieceId))
-						return
-					}
-
-					// gather nodes where the calculated piece hash doesn't match the uplink signed piece hash
-					if ErrPieceHashVerifyFailed.Has(err) {
-						log.Info("audit failed",
-							zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
-							zap.Stringer("piece_id", limit.Limit.PieceId),
-							zap.String("reason", err.Error()))
-						pieces.Failed = append(pieces.Failed, PieceFetchResult{Piece: piece, Err: err})
-						errorCount++
-						return
-					}
-
-					var pieceAudit audit.PieceAudit
-					if ErrDownloadTimedOut.Has(err) {
-						pieceAudit = audit.PieceAuditContained
-					} else {
-						pieceAudit = audit.PieceAuditFromErr(err)
-					}
-
-					switch pieceAudit {
-					case audit.PieceAuditFailure:
-						log.Debug("Failed to download piece for repair: piece not found (audit failed)",
-							zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
-							zap.Stringer("piece_id", limit.Limit.PieceId),
-							zap.Error(err))
-						pieces.Failed = append(pieces.Failed, PieceFetchResult{Piece: piece, Err: err})
-						errorCount++
-
-					case audit.PieceAuditOffline:
-						log.Debug("Failed to download piece for repair: dial timeout (offline)",
-							zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
-							zap.Stringer("piece_id", limit.Limit.PieceId),
-							zap.Error(err))
-						pieces.Offline = append(pieces.Offline, PieceFetchResult{Piece: piece, Err: err})
-						errorCount++
-
-					case audit.PieceAuditContained:
-						log.Info("Failed to download piece for repair: download timeout (contained)",
-							zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
-							zap.Stringer("piece_id", limit.Limit.PieceId),
-							zap.Error(err))
-						pieces.Contained = append(pieces.Contained, PieceFetchResult{Piece: piece, Err: err})
-						errorCount++
-
-					case audit.PieceAuditUnknown:
-						log.Info("Failed to download piece for repair: unknown transport error (skipped)",
-							zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
-							zap.Stringer("piece_id", limit.Limit.PieceId),
-							zap.Error(err))
-						pieces.Unknown = append(pieces.Unknown, PieceFetchResult{Piece: piece, Err: err})
-						errorCount++
-					}
-
-					return
-				}
-
-				pieceReaders[currentLimitIndex] = pieceReadCloser
-				pieces.Successful = append(pieces.Successful, PieceFetchResult{Piece: piece})
-				successfulPieces++
-				return
-			}
+	for _, result := range successes {
+		pieceReaders[result.Index] = result.Value
+		pieces.Successful = append(pieces.Successful, PieceFetchResult{
+			Piece: metabase.Piece{
+				Number:      uint16(result.Index),
+				StorageNode: limits[result.Index].GetLimit().StorageNodeId,
+			},
 		})
 	}
 
-	limiter.Wait()
+	for _, result := range failures {
+		limit := limits[result.Index]
+		piece := metabase.Piece{
+			Number:      uint16(result.Index),
+			StorageNode: limit.GetLimit().StorageNodeId,
+		}
+		fetchResult := PieceFetchResult{Piece: piece, Err: result.Error}
+
+		// Classify the error (logging already happened in downloadPiece)
+		if errors.Is(result.Error, context.Canceled) {
+			// Download was canceled due to racing, don't record as failure
+			continue
+		}
+
+		if ErrPieceHashVerifyFailed.Has(result.Error) {
+			pieces.Failed = append(pieces.Failed, fetchResult)
+			continue
+		}
+
+		var pieceAudit audit.PieceAudit
+		if ErrDownloadTimedOut.Has(result.Error) {
+			pieceAudit = audit.PieceAuditContained
+		} else {
+			pieceAudit = audit.PieceAuditFromErr(result.Error)
+		}
+
+		switch pieceAudit {
+		case audit.PieceAuditFailure:
+			pieces.Failed = append(pieces.Failed, fetchResult)
+		case audit.PieceAuditOffline:
+			pieces.Offline = append(pieces.Offline, fetchResult)
+		case audit.PieceAuditContained:
+			pieces.Contained = append(pieces.Contained, fetchResult)
+		case audit.PieceAuditUnknown:
+			pieces.Unknown = append(pieces.Unknown, fetchResult)
+		}
+	}
+
+	successfulPieces := len(successes)
+	errorCount := len(pieces.Failed) + len(pieces.Offline) + len(pieces.Contained) + len(pieces.Unknown)
 
 	if successfulPieces < es.RequiredCount() {
 		mon.Meter("download_failed_not_enough_pieces_repair").Mark(1)
@@ -315,6 +206,94 @@ func (ec *ECRepairer) Get(ctx context.Context, log *zap.Logger, limits []*pb.Add
 	decodeReader := eestream.DecodeReaders2(ctx, cancel, pieceReaders, esScheme, expectedSize, 0, false)
 
 	return decodeReader, pieces, nil
+}
+
+// downloadPiece downloads a single piece from a storage node, handling LastIPPort retry logic.
+func (ec *ECRepairer) downloadPiece(ctx context.Context, log *zap.Logger, index int, limit *pb.AddressedOrderLimit, cachedNodesInfo map[storj.NodeID]overlay.NodeReputation, privateKey storj.PiecePrivateKey, pieceSize int64) (io.ReadCloser, error) {
+	info := cachedNodesInfo[limit.GetLimit().StorageNodeId]
+	address := limit.GetStorageNodeAddress().GetAddress()
+	var triedLastIPPort bool
+	if info.LastIPPort != "" && info.LastIPPort != address {
+		address = info.LastIPPort
+		triedLastIPPort = true
+	}
+
+	log.Debug("attempting to fetch piece for repair",
+		zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
+		zap.Stringer("piece_id", limit.Limit.PieceId),
+		zap.Int("piece_index", index),
+		zap.String("address", limit.GetStorageNodeAddress().Address),
+		zap.String("last_ip_port", info.LastIPPort),
+		zap.Binary("serial", limit.Limit.SerialNumber[:]))
+
+	pieceReadCloser, _, _, err := ec.downloadAndVerifyPiece(ctx, limit, address, privateKey, "", pieceSize)
+	// if piecestore dial with last ip:port failed try again with node address
+	if triedLastIPPort && ErrDialFailed.Has(err) {
+		if pieceReadCloser != nil {
+			_ = pieceReadCloser.Close()
+		}
+		log.Info("repair get failed; retrying with specified hostname", zap.Error(err), zap.String("last_ip_port", info.LastIPPort), zap.String("hostname", limit.GetStorageNodeAddress().GetAddress()))
+		pieceReadCloser, _, _, err = ec.downloadAndVerifyPiece(ctx, limit, limit.GetStorageNodeAddress().GetAddress(), privateKey, "", pieceSize)
+	}
+
+	if err != nil {
+		if pieceReadCloser != nil {
+			_ = pieceReadCloser.Close()
+		}
+
+		// Log the error when it happens
+		if errors.Is(err, context.Canceled) {
+			log.Debug("Download canceled due to racing",
+				zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
+				zap.Stringer("piece_id", limit.Limit.PieceId))
+			return nil, err
+		}
+
+		if ErrPieceHashVerifyFailed.Has(err) {
+			log.Info("audit failed",
+				zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
+				zap.Stringer("piece_id", limit.Limit.PieceId),
+				zap.String("reason", err.Error()))
+			return nil, err
+		}
+
+		var pieceAudit audit.PieceAudit
+		if ErrDownloadTimedOut.Has(err) {
+			pieceAudit = audit.PieceAuditContained
+		} else {
+			pieceAudit = audit.PieceAuditFromErr(err)
+		}
+
+		switch pieceAudit {
+		case audit.PieceAuditFailure:
+			log.Debug("Failed to download piece for repair: piece not found (audit failed)",
+				zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
+				zap.Stringer("piece_id", limit.Limit.PieceId),
+				zap.Error(err))
+
+		case audit.PieceAuditOffline:
+			log.Debug("Failed to download piece for repair: dial timeout (offline)",
+				zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
+				zap.Stringer("piece_id", limit.Limit.PieceId),
+				zap.Error(err))
+
+		case audit.PieceAuditContained:
+			log.Info("Failed to download piece for repair: download timeout (contained)",
+				zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
+				zap.Stringer("piece_id", limit.Limit.PieceId),
+				zap.Error(err))
+
+		case audit.PieceAuditUnknown:
+			log.Info("Failed to download piece for repair: unknown transport error (skipped)",
+				zap.Stringer("node_id", limit.GetLimit().StorageNodeId),
+				zap.Stringer("piece_id", limit.Limit.PieceId),
+				zap.Error(err))
+		}
+
+		return nil, err
+	}
+
+	return pieceReadCloser, nil
 }
 
 // lazyHashWriter is a writer which can get the hash algorithm just before the first write.
