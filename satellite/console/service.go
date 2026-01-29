@@ -1405,9 +1405,9 @@ func (payment Payments) AttemptPayOverdueInvoices(ctx context.Context) (err erro
 	return nil
 }
 
-// checkRegistrationSecret returns a RegistrationToken if applicable (nil if not), and an error
+// CheckRegistrationSecret returns a RegistrationToken if applicable (nil if not), and an error
 // if and only if the registration shouldn't proceed.
-func (s *Service) checkRegistrationSecret(ctx context.Context, tokenSecret RegistrationSecret) (*RegistrationToken, error) {
+func (s *Service) CheckRegistrationSecret(ctx context.Context, tokenSecret RegistrationSecret) (*RegistrationToken, error) {
 	if s.config.OpenRegistrationEnabled && tokenSecret.IsZero() {
 		// in this case we're going to let the registration happen without a token
 		return nil, nil
@@ -1455,7 +1455,7 @@ func (s *Service) ValidateSecurityToken(value string) error {
 }
 
 // CreateUser gets password hash value and creates new inactive User.
-func (s *Service) CreateUser(ctx context.Context, user CreateUser, tokenSecret RegistrationSecret) (u *User, err error) {
+func (s *Service) CreateUser(ctx context.Context, user CreateUser, registrationToken *RegistrationToken) (u *User, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	mon.Counter("create_user_attempt").Inc(1)
@@ -1463,11 +1463,6 @@ func (s *Service) CreateUser(ctx context.Context, user CreateUser, tokenSecret R
 	if err := user.IsValid(user.AllowNoName); err != nil {
 		// NOTE: error is already wrapped with an appropriated class.
 		return nil, err
-	}
-
-	registrationToken, err := s.checkRegistrationSecret(ctx, tokenSecret)
-	if err != nil {
-		return nil, ErrRegToken.Wrap(err)
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(user.Password), s.config.PasswordCost)
@@ -1515,10 +1510,12 @@ func (s *Service) CreateUser(ctx context.Context, user CreateUser, tokenSecret R
 		hasTenant := newUser.TenantID != nil && *newUser.TenantID != ""
 		if hasTenant {
 			newUser.ProjectLimit = s.config.UsageLimits.Project.Paid
-		} else if registrationToken != nil {
-			newUser.ProjectLimit = registrationToken.ProjectLimit
 		} else {
 			newUser.ProjectLimit = s.config.UsageLimits.Project.Free
+		}
+
+		if registrationToken != nil {
+			newUser.ProjectLimit = registrationToken.ProjectLimit
 		}
 
 		if !user.NoTrialExpiration && s.config.FreeTrialDuration != 0 {
