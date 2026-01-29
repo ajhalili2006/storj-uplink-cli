@@ -714,6 +714,10 @@ Creates a registration token that can be used to register a new user with preset
 ```typescript
 {
 	projectLimit: number
+	storageLimit: number
+	bandwidthLimit: number
+	segmentLimit: number
+	expiresIn: string
 	reason: string
 }
 
@@ -724,6 +728,7 @@ Creates a registration token that can be used to register a new user with preset
 ```typescript
 {
 	token: string
+	expiresAt: string // Date timestamp formatted as `2006-01-02T15:00:00Z`
 }
 
 ```

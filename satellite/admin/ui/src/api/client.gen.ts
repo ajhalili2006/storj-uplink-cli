@@ -90,11 +90,16 @@ export class ChangeLog {
 
 export class CreateRegistrationTokenRequest {
     projectLimit: number;
+    storageLimit?: number | null;
+    bandwidthLimit?: number | null;
+    segmentLimit?: number | null;
+    expiresIn?: string;
     reason: string;
 }
 
 export class CreateRegistrationTokenResponse {
     token: string;
+    expiresAt?: Time | null;
 }
 
 export class CreateRestKeyRequest {

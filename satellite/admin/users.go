@@ -1122,13 +1122,18 @@ func (s *Service) CreateRestKey(ctx context.Context, authInfo *AuthInfo, userID 
 
 // CreateRegistrationTokenRequest is the request body for creating a registration token.
 type CreateRegistrationTokenRequest struct {
-	ProjectLimit int    `json:"projectLimit"`
-	Reason       string `json:"reason"`
+	ProjectLimit   int    `json:"projectLimit"`
+	StorageLimit   *int64 `json:"storageLimit,omitempty"`
+	BandwidthLimit *int64 `json:"bandwidthLimit,omitempty"`
+	SegmentLimit   *int64 `json:"segmentLimit,omitempty"`
+	ExpiresIn      string `json:"expiresIn,omitempty"` // duration string like "168h" for 7 days
+	Reason         string `json:"reason"`
 }
 
 // CreateRegistrationTokenResponse is the response for creating a registration token.
 type CreateRegistrationTokenResponse struct {
-	Token string `json:"token"`
+	Token     string     `json:"token"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
 // CreateRegistrationToken creates a new registration token that can be used to register a new user.
@@ -1151,11 +1156,30 @@ func (s *Service) CreateRegistrationToken(ctx context.Context, authInfo *AuthInf
 		}
 	}
 
+	var expiresAt *time.Time
+	if request.ExpiresIn != "" {
+		duration, err := time.ParseDuration(request.ExpiresIn)
+		if err != nil {
+			return nil, api.HTTPError{
+				Status: http.StatusBadRequest,
+				Err:    Error.New("invalid expiresIn duration"),
+			}
+		}
+		t := s.nowFn().Add(duration)
+		expiresAt = &t
+	}
+
 	if request.ProjectLimit <= 0 {
 		request.ProjectLimit = 1
 	}
 
-	token, err := s.consoleDB.RegistrationTokens().Create(ctx, request.ProjectLimit)
+	token, err := s.consoleDB.RegistrationTokens().CreateWithLimits(ctx, console.CreateRegistrationTokenParams{
+		ProjectLimit:   request.ProjectLimit,
+		StorageLimit:   request.StorageLimit,
+		BandwidthLimit: request.BandwidthLimit,
+		SegmentLimit:   request.SegmentLimit,
+		ExpiresAt:      expiresAt,
+	})
 	if err != nil {
 		return nil, api.HTTPError{
 			Status: http.StatusInternalServerError,
@@ -1174,7 +1198,10 @@ func (s *Service) CreateRegistrationToken(ctx context.Context, authInfo *AuthInf
 		Timestamp:  s.nowFn(),
 	})
 
-	return &CreateRegistrationTokenResponse{Token: token.Secret.String()}, api.HTTPError{}
+	return &CreateRegistrationTokenResponse{
+		Token:     token.Secret.String(),
+		ExpiresAt: token.ExpiresAt,
+	}, api.HTTPError{}
 }
 
 // TestToggleAbbreviatedUserDelete is a test helper to toggle abbreviated user deletion.

@@ -9,6 +9,7 @@ import {
     ChangeHistoryHttpApiV1,
     ChangeLog,
     CreateRegistrationTokenRequest,
+    CreateRegistrationTokenResponse,
     CreateRestKeyRequest,
     DeleteLicenseRequest,
     DisableUserRequest,
@@ -128,12 +129,8 @@ export const useUsersStore = defineStore('users', () => {
         return await userApi.createRestKey(request, userID);
     }
 
-    async function createRegistrationToken(projectLimit: number, reason: string): Promise<string> {
-        const request = new CreateRegistrationTokenRequest();
-        request.projectLimit = projectLimit;
-        request.reason = reason;
-        const response = await userApi.createRegistrationToken(request);
-        return response.token;
+    async function createRegistrationToken(request: CreateRegistrationTokenRequest): Promise<CreateRegistrationTokenResponse> {
+        return await userApi.createRegistrationToken(request);
     }
 
     async function findUsers(param: string): Promise<void> {

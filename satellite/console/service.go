@@ -1424,6 +1424,11 @@ func (s *Service) CheckRegistrationSecret(ctx context.Context, tokenSecret Regis
 		return nil, ErrValidation.New(usedRegTokenErrMsg)
 	}
 
+	// check if the token has expired
+	if registrationToken.IsExpired() {
+		return nil, ErrValidation.New("registration token has expired")
+	}
+
 	return registrationToken, nil
 }
 
@@ -1513,7 +1518,6 @@ func (s *Service) CreateUser(ctx context.Context, user CreateUser, registrationT
 		} else {
 			newUser.ProjectLimit = s.config.UsageLimits.Project.Free
 		}
-
 		if registrationToken != nil {
 			newUser.ProjectLimit = registrationToken.ProjectLimit
 		}
@@ -1528,10 +1532,20 @@ func (s *Service) CreateUser(ctx context.Context, user CreateUser, registrationT
 			newUser.ProjectBandwidthLimit = s.config.UsageLimits.Bandwidth.Paid.Int64()
 			newUser.ProjectSegmentLimit = s.config.UsageLimits.Segment.Paid
 		} else {
-			// TODO: move the project limits into the registration token.
 			newUser.ProjectStorageLimit = s.config.UsageLimits.Storage.Free.Int64()
 			newUser.ProjectBandwidthLimit = s.config.UsageLimits.Bandwidth.Free.Int64()
 			newUser.ProjectSegmentLimit = s.config.UsageLimits.Segment.Free
+		}
+		if registrationToken != nil {
+			if registrationToken.StorageLimit != nil {
+				newUser.ProjectStorageLimit = *registrationToken.StorageLimit
+			}
+			if registrationToken.BandwidthLimit != nil {
+				newUser.ProjectBandwidthLimit = *registrationToken.BandwidthLimit
+			}
+			if registrationToken.SegmentLimit != nil {
+				newUser.ProjectSegmentLimit = *registrationToken.SegmentLimit
+			}
 		}
 
 		u, err = tx.Users().Insert(ctx,
