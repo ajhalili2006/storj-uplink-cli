@@ -129,6 +129,14 @@ export interface PaymentsApi {
     paymentsHistory(param: PaymentHistoryParam): Promise<PaymentHistoryPage>;
 
     /**
+     * Returns a single failed invoice.
+     *
+     * @returns the failed invoice
+     * @throws Error
+     */
+    getFailedInvoice(): Promise<PaymentsHistoryItem | null>;
+
+    /**
      * Returns a list of invoices, transactions and all others payments history items for payment account.
      *
      * @returns list of payments history items
@@ -342,6 +350,8 @@ export class PaymentsHistoryItem {
         public readonly end: Date = new Date(),
         public readonly type: PaymentsHistoryItemType = PaymentsHistoryItemType.Invoice,
         public readonly remaining: number = 0,
+        public readonly payLink: string = '',
+        public readonly failed: boolean = false,
     ) { }
 
     public get formattedStatus(): string {

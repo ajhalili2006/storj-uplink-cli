@@ -144,6 +144,7 @@ export enum AnalyticsErrorEventSource {
     STOP_OR_RESTART_COMPUTE_INSTANCE_DIALOG = 'Stop Or Restart Compute Instance Dialog',
     COMPUTE_INSTANCES_TABLE = 'Compute Instances Table',
     COMPUTE_INSTANCE_DETAILS_MODAL = 'Compute Instance Details Modal',
+    RETRY_PAYMENT_BANNER = 'Retry Payment Banner',
 }
 
 export enum PageVisitSource {
