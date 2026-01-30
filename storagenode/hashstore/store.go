@@ -218,7 +218,7 @@ func NewStore(
 				excluder = nil
 				break
 			}
-			return nil, Error.New("missing hashtbl %q when log files exist in %q", maxTablePath, s.logsPath)
+			return nil, Error.New("potential misconfiguration: missing hashtbl %q when log files exist in %q", maxTablePath, s.logsPath)
 		}
 
 		// atomically create an empty hashtbl.
@@ -354,6 +354,12 @@ func NewStore(
 
 		// include the log file in the writeable collection.
 		s.lfc.Include(lf)
+	}
+
+	// if we have any tails (so we have a table) and we have no log files, then we probably have
+	// a misconfiguration. so instead of just sending every piece up for amnesty, error out.
+	if len(tails) > 0 && s.lfs.Empty() {
+		return nil, Error.New("potential misconfiguration: missing log files when hashtbl exists")
 	}
 
 	// now reconcile any tails we didn't see log files for.
