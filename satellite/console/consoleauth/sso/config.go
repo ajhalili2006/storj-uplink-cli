@@ -14,12 +14,13 @@ import (
 
 // Config is a configuration struct for SSO.
 type Config struct {
-	Enabled               bool                  `help:"whether SSO is enabled." default:"false"`
-	OidcProviderInfos     OidcProviderInfos     `help:"semicolon-separated provider:client-id,client-secret,provider-url." default:""`
-	EmailProviderMappings EmailProviderMappings `help:"semicolon-separated provider:email-regex as provided in oidc-provider-infos." default:""`
-	GeneralProviders      GeneralProviders      `help:"semicolon-separated provider names for general SSO (opt-in, no email mapping). Must exist in oidc-provider-infos." default:""`
-	MockSso               bool                  `help:"whether to mock SSO for testing purposes. This should never be true in production." default:"false" hidden:"true"`
-	MockEmail             string                `help:"mock email for successful SSO auth for testing purposes." default:"" hidden:"true"`
+	Enabled                        bool                  `help:"whether SSO is enabled." default:"false"`
+	OidcProviderInfos              OidcProviderInfos     `help:"semicolon-separated provider:client-id,client-secret,provider-url." default:""`
+	EmailProviderMappings          EmailProviderMappings `help:"semicolon-separated provider:email-regex as provided in oidc-provider-infos." default:""`
+	GeneralProviders               GeneralProviders      `help:"semicolon-separated provider names for general SSO (opt-in, no email mapping). Must exist in oidc-provider-infos." default:""`
+	GeneralLinkVerificationEnabled bool                  `help:"require satellite email verification before linking existing users via general SSO." default:"false"`
+	MockSso                        bool                  `help:"whether to mock SSO for testing purposes. This should never be true in production." default:"false" hidden:"true"`
+	MockEmail                      string                `help:"mock email for successful SSO auth for testing purposes." default:"" hidden:"true"`
 }
 
 // Ensure that GeneralProviders implements pflag.Value.

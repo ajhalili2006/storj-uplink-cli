@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -1864,6 +1865,122 @@ func (s *Service) GenerateActivationToken(ctx context.Context, id uuid.UUID, ema
 	defer mon.Task()(&ctx)(&err)
 
 	return s.tokens.CreateToken(ctx, id, email)
+}
+
+// InitiateSsoLinkVerification sends a verification code email and returns a signed link token.
+func (s *Service) InitiateSsoLinkVerification(ctx context.Context, user *User, externalID string) (token string, expiresAt time.Time, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	if user == nil {
+		return "", time.Time{}, ErrValidation.New("user is required")
+	}
+	if externalID == "" {
+		return "", time.Time{}, ErrValidation.New("external ID is required")
+	}
+
+	verificationCode, err := generateVerificationCode()
+	if err != nil {
+		return "", time.Time{}, Error.Wrap(err)
+	}
+
+	err = s.store.Users().Update(ctx, user.ID, UpdateUserRequest{
+		ActivationCode: &verificationCode,
+	})
+	if err != nil {
+		return "", time.Time{}, Error.Wrap(err)
+	}
+
+	claims := &consoleauth.Claims{
+		ID:         user.ID,
+		Email:      user.Email,
+		ExternalID: externalID,
+	}
+	token, err = s.tokens.CreateTokenWithClaims(ctx, claims)
+	if err != nil {
+		return "", time.Time{}, Error.Wrap(err)
+	}
+
+	s.mailService.SendRenderedAsync(
+		ctx,
+		[]post.Address{{Address: user.Email, Name: user.FullName}},
+		&EmailAddressVerificationEmail{
+			VerificationCode: verificationCode,
+			Action:           "SSO account linking",
+		},
+	)
+
+	return token, claims.Expiration, nil
+}
+
+// VerifySsoLink validates the link token and verification code, then links the account.
+func (s *Service) VerifySsoLink(ctx context.Context, linkToken, code, ip, userAgent, anonymousID string) (_ *TokenInfo, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	if code == "" {
+		return nil, ErrValidation.New("verification code is required")
+	}
+
+	parsedToken, err := consoleauth.FromBase64URLString(linkToken)
+	if err != nil {
+		return nil, ErrTokenInvalid.Wrap(err)
+	}
+
+	valid, err := s.tokens.ValidateToken(parsedToken)
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+	if !valid {
+		return nil, ErrTokenInvalid.New("incorrect signature")
+	}
+
+	claims, err := consoleauth.FromJSON(parsedToken.Payload)
+	if err != nil {
+		return nil, ErrTokenInvalid.New("JSON decoder: %w", err)
+	}
+	if time.Now().After(claims.Expiration) {
+		return nil, ErrTokenExpiration.New(activationTokenExpiredErrMsg)
+	}
+	if claims.ExternalID == "" {
+		return nil, ErrValidation.New("external ID is missing")
+	}
+
+	user, err := s.store.Users().Get(ctx, claims.ID)
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+	if claims.Email != "" && !strings.EqualFold(user.Email, claims.Email) {
+		return nil, ErrValidation.New("email does not match")
+	}
+	if subtle.ConstantTimeCompare([]byte(user.ActivationCode), []byte(code)) != 1 {
+		return nil, ErrActivationCode.New("verification code is incorrect")
+	}
+
+	rowsAffected, err := s.store.Users().UpdateExternalIDWithActivationCode(ctx, user.ID, code, claims.ExternalID)
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+	if rowsAffected == 0 {
+		updated, err := s.store.Users().Get(ctx, user.ID)
+		if err != nil {
+			return nil, Error.Wrap(err)
+		}
+		if updated.ExternalID == nil || *updated.ExternalID == "" {
+			return nil, ErrActivationCode.New("verification code is incorrect")
+		}
+		if *updated.ExternalID != claims.ExternalID {
+			return nil, ErrValidation.New("user already linked to a different SSO account")
+		}
+	}
+
+	return s.GenerateSessionToken(ctx, SessionTokenRequest{
+		UserID:          user.ID,
+		TenantID:        user.TenantID,
+		Email:           user.Email,
+		IP:              ip,
+		UserAgent:       userAgent,
+		AnonymousID:     anonymousID,
+		HubspotObjectID: user.HubspotObjectID,
+	})
 }
 
 // GeneratePasswordRecoveryToken - is a method for generating password recovery token.

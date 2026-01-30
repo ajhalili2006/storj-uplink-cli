@@ -1711,7 +1711,6 @@ func TestGeneralSsoLinksExistingUser(t *testing.T) {
 			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
 				config.SSO.Enabled = true
 				config.SSO.MockSso = true
-				config.SSO.MockEmail = "existing@mail.test"
 				config.Console.RateLimit.Burst = 50
 				config.SSO.OidcProviderInfos = sso.OidcProviderInfos{
 					Values: map[string]sso.OidcProviderInfo{
@@ -1725,16 +1724,30 @@ func TestGeneralSsoLinksExistingUser(t *testing.T) {
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
 		sat := planet.Satellites[0]
 
-		user, err := sat.AddUser(ctx, console.CreateUser{
-			FullName: "Existing User",
-			Email:    "existing@mail.test",
-		}, 1)
-		require.NoError(t, err)
+		tests := []struct {
+			name                       string
+			email                      string
+			linkVerificationEnabled    bool
+			expectLinkVerificationFlow bool
+		}{
+			{
+				name:                       "direct link",
+				email:                      "existing-direct@mail.test",
+				linkVerificationEnabled:    false,
+				expectLinkVerificationFlow: false,
+			},
+			{
+				name:                       "verification flow",
+				email:                      "existing-verify@mail.test",
+				linkVerificationEnabled:    true,
+				expectLinkVerificationFlow: true,
+			},
+		}
 
-		login := func(expectedCode int) {
+		login := func(email, password string, expectedCode int) {
 			body := console.AuthUser{
-				Email:    user.Email,
-				Password: user.FullName,
+				Email:    email,
+				Password: password,
 			}
 			bodyBytes, err := json.Marshal(body)
 			require.NoError(t, err)
@@ -1750,29 +1763,73 @@ func TestGeneralSsoLinksExistingUser(t *testing.T) {
 			require.NoError(t, result.Body.Close())
 		}
 
-		// Password login works before linking.
-		login(http.StatusOK)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				sat.API.SSO.Service.TestSetGeneralLinkVerificationEnabled(tt.linkVerificationEnabled)
+				sat.API.SSO.Service.TestSetMockEmail(tt.email)
 
-		jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: nil})
-		require.NoError(t, err)
-		client := &http.Client{Jar: jar}
+				user, err := sat.AddUser(ctx, console.CreateUser{
+					FullName: "Existing User",
+					Email:    tt.email,
+				}, 1)
+				require.NoError(t, err)
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, sat.ConsoleURL()+"/sso/general", nil)
-		require.NoError(t, err)
+				// Password login works before linking.
+				login(user.Email, user.FullName, http.StatusOK)
 
-		result, err := client.Do(req)
-		require.NoError(t, err)
-		require.Equal(t, sat.ConsoleURL()+"/", result.Request.URL.String())
-		require.NoError(t, result.Body.Close())
+				jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: nil})
+				require.NoError(t, err)
+				client := &http.Client{Jar: jar}
 
-		linkedUser, err := sat.API.DB.Console().Users().GetByEmailAndTenant(ctx, user.Email, nil)
-		require.NoError(t, err)
-		require.Equal(t, user.ID, linkedUser.ID)
-		require.NotNil(t, linkedUser.ExternalID)
-		require.Equal(t, "general:existing@mail.test", *linkedUser.ExternalID)
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, sat.ConsoleURL()+"/sso/general", nil)
+				require.NoError(t, err)
 
-		// After linking, password login is restricted.
-		login(http.StatusForbidden)
+				result, err := client.Do(req)
+				require.NoError(t, err)
+				if tt.expectLinkVerificationFlow {
+					require.Contains(t, result.Request.URL.String(), "/sso-link")
+				} else {
+					require.Equal(t, sat.ConsoleURL()+"/", result.Request.URL.String())
+				}
+				require.NoError(t, result.Body.Close())
+
+				linkedUser, err := sat.API.DB.Console().Users().GetByEmailAndTenant(ctx, user.Email, nil)
+				require.NoError(t, err)
+
+				if tt.expectLinkVerificationFlow {
+					require.NotEmpty(t, linkedUser.ActivationCode)
+					require.Nil(t, linkedUser.ExternalID)
+
+					verifyBody, err := json.Marshal(map[string]string{
+						"code": linkedUser.ActivationCode,
+					})
+					require.NoError(t, err)
+					verifyReq, err := http.NewRequestWithContext(ctx, http.MethodPost, sat.ConsoleURL()+"/sso/link/verify", bytes.NewBuffer(verifyBody))
+					require.NoError(t, err)
+					verifyReq.Header.Set("Content-Type", "application/json")
+
+					verifyResp, err := client.Do(verifyReq)
+					require.NoError(t, err)
+					require.Equal(t, http.StatusOK, verifyResp.StatusCode)
+					verifyRespBody, err := io.ReadAll(verifyResp.Body)
+					require.NoError(t, err)
+					require.Contains(t, string(verifyRespBody), "token")
+					require.NoError(t, verifyResp.Body.Close())
+
+					linkedUser, err = sat.API.DB.Console().Users().GetByEmailAndTenant(ctx, user.Email, nil)
+					require.NoError(t, err)
+					require.NotNil(t, linkedUser.ExternalID)
+					require.Equal(t, "general:"+tt.email, *linkedUser.ExternalID)
+					require.Empty(t, linkedUser.ActivationCode)
+				} else {
+					require.NotNil(t, linkedUser.ExternalID)
+					require.Equal(t, "general:"+tt.email, *linkedUser.ExternalID)
+				}
+
+				// After linking, password login is restricted.
+				login(user.Email, user.FullName, http.StatusForbidden)
+			})
+		}
 	})
 }
 

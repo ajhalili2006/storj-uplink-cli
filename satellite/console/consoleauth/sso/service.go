@@ -151,6 +151,11 @@ func (s *Service) IsProviderConfigured(provider string) bool {
 	return ok
 }
 
+// GeneralLinkVerificationEnabled returns true if general SSO linking requires email verification.
+func (s *Service) GeneralLinkVerificationEnabled() bool {
+	return s.config.GeneralLinkVerificationEnabled
+}
+
 // GetProviderByEmail returns the provider for the given email.
 func (s *Service) GetProviderByEmail(email string) string {
 	for provider, emailRegex := range s.config.EmailProviderMappings.Values {
@@ -253,4 +258,14 @@ func (s *Service) GetSsoEmailToken(email string) (string, error) {
 		return "", Error.Wrap(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(signed), nil
+}
+
+// TestSetGeneralLinkVerificationEnabled sets general link verification enabled for testing.
+func (s *Service) TestSetGeneralLinkVerificationEnabled(enabled bool) {
+	s.config.GeneralLinkVerificationEnabled = enabled
+}
+
+// TestSetMockEmail sets the mock email for testing.
+func (s *Service) TestSetMockEmail(email string) {
+	s.config.MockEmail = email
 }

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -247,6 +248,32 @@ func (a *Auth) AuthenticateSso(w http.ResponseWriter, r *http.Request) {
 	}
 	userAgent := r.UserAgent()
 
+	if isGeneralProvider && a.ssoService.GeneralLinkVerificationEnabled() {
+		externalID := fmt.Sprintf("%s:%s", provider, claims.Sub)
+
+		existingUser, _, err := a.service.GetUserByEmailWithUnverified(ctx, claims.Email)
+		if err != nil && !console.ErrEmailNotFound.Has(err) {
+			a.log.Error("Error getting user for sso link verification", zap.Error(err))
+			http.Redirect(w, r, ssoFailedAddr, http.StatusPermanentRedirect)
+			return
+		}
+		if existingUser != nil && (existingUser.ExternalID == nil || *existingUser.ExternalID == "") {
+			linkToken, expiresAt, err := a.service.InitiateSsoLinkVerification(ctx, existingUser, externalID)
+			if err != nil {
+				a.log.Error("Error initiating sso link verification", zap.Error(err))
+				http.Redirect(w, r, ssoFailedAddr, http.StatusPermanentRedirect)
+				return
+			}
+
+			a.cookieAuth.SetSSOLinkCookie(w, linkToken, expiresAt)
+
+			externalAddr := a.getExternalAddress(ctx)
+			linkAddr := strings.TrimSuffix(externalAddr, "/") + "/sso-link"
+			http.Redirect(w, r, linkAddr, http.StatusTemporaryRedirect)
+			return
+		}
+	}
+
 	user, err := a.service.GetUserForSsoAuth(ctx, *claims, provider, ip, userAgent)
 	if err != nil {
 		a.log.Error("Error getting user for sso auth", zap.Error(err))
@@ -294,6 +321,55 @@ func (a *Auth) GetSsoUrl(w http.ResponseWriter, r *http.Request) {
 	_, err = w.Write([]byte(ssoUrl))
 	if err != nil {
 		a.log.Error("failed to write response", zap.Error(err))
+	}
+}
+
+// VerifySsoLink verifies an email code and completes general SSO account linking.
+func (a *Auth) VerifySsoLink(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var err error
+	defer mon.Task()(&ctx)(&err)
+
+	var data struct {
+		Code string `json:"code"`
+	}
+	if err = json.NewDecoder(r.Body).Decode(&data); err != nil {
+		a.serveJSONError(ctx, w, err)
+		return
+	}
+	if len(data.Code) != 6 {
+		a.serveJSONError(ctx, w, console.ErrValidation.New("the verification code must be 6 characters long"))
+		return
+	}
+
+	linkCookie, err := r.Cookie(a.cookieAuth.GetSSOLinkCookieName())
+	if err != nil {
+		a.serveJSONError(ctx, w, console.ErrValidation.New("missing SSO link token"))
+		return
+	}
+
+	ip, err := web.GetRequestIP(r)
+	if err != nil {
+		a.serveJSONError(ctx, w, err)
+		return
+	}
+
+	tokenInfo, err := a.service.VerifySsoLink(ctx, linkCookie.Value, data.Code, ip, r.UserAgent(), LoadAjsAnonymousID(r))
+	if err != nil {
+		a.serveJSONError(ctx, w, err)
+		return
+	}
+
+	a.cookieAuth.RemoveSSOLinkCookie(w)
+	a.cookieAuth.SetTokenCookie(w, *tokenInfo)
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if err = json.NewEncoder(w).Encode(struct {
+		console.TokenInfo
+		Token string `json:"token"`
+	}{*tokenInfo, tokenInfo.Token.String()}); err != nil {
+		a.log.Error("could not encode token response", zap.Error(ErrAuthAPI.Wrap(err)))
 	}
 }
 

@@ -264,6 +264,9 @@ func NewServer(logger *zap.Logger, config Config, service *console.Service, cons
 	}, consolewebauth.CookieSettings{
 		Name: "sso_email_token",
 		Path: "/",
+	}, consolewebauth.CookieSettings{
+		Name: "sso_link_token",
+		Path: "/",
 	}, server.config.AuthCookieDomain)
 
 	if server.config.ExternalAddress != "" {
@@ -535,6 +538,7 @@ func NewServer(logger *zap.Logger, config Config, service *console.Service, cons
 		ssoRouter.Handle("/url", server.ipRateLimiter.Limit(http.HandlerFunc(authController.GetSsoUrl)))
 		ssoRouter.Handle("/{provider}", server.ipRateLimiter.Limit(http.HandlerFunc(authController.BeginSsoFlow)))
 		ssoRouter.Handle("/{provider}/callback", server.ipRateLimiter.Limit(http.HandlerFunc(authController.AuthenticateSso)))
+		ssoRouter.Handle("/link/verify", server.ipRateLimiter.Limit(http.HandlerFunc(authController.VerifySsoLink))).Methods(http.MethodPost, http.MethodOptions)
 	}
 
 	if server.config.GeneratedAPIEnabled {

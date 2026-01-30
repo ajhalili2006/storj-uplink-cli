@@ -5698,6 +5698,43 @@ func TestSetActivationCodeAndSignupID(t *testing.T) {
 	})
 }
 
+func TestSsoLinkVerification(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1,
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		srv := sat.API.Console.Service
+
+		user, err := sat.AddUser(ctx, console.CreateUser{
+			FullName: "SSO Link User",
+			Email:    "sso.link@test.example",
+		}, 1)
+		require.NoError(t, err)
+
+		externalID := "general:external-sub"
+		linkToken, _, err := srv.InitiateSsoLinkVerification(ctx, user, externalID)
+		require.NoError(t, err)
+
+		updated, err := sat.DB.Console().Users().Get(ctx, user.ID)
+		require.NoError(t, err)
+		require.NotEmpty(t, updated.ActivationCode)
+
+		_, err = srv.VerifySsoLink(ctx, linkToken, "000000", "127.0.0.1", "test-agent", "")
+		require.Error(t, err)
+		require.True(t, console.ErrActivationCode.Has(err))
+
+		tokenInfo, err := srv.VerifySsoLink(ctx, linkToken, updated.ActivationCode, "127.0.0.1", "test-agent", "")
+		require.NoError(t, err)
+		require.NotNil(t, tokenInfo)
+
+		linked, err := sat.DB.Console().Users().Get(ctx, user.ID)
+		require.NoError(t, err)
+		require.NotNil(t, linked.ExternalID)
+		require.Equal(t, externalID, *linked.ExternalID)
+		require.Empty(t, linked.ActivationCode)
+	})
+}
+
 func TestRESTKeys(t *testing.T) {
 	testplanet.Run(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 0, UplinkCount: 1,
