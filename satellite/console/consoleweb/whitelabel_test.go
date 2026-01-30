@@ -683,3 +683,137 @@ func TestTenantExternalAddressInInviteLinks(t *testing.T) {
 		})
 	})
 }
+
+// TestSingleWhiteLabelTenantContext verifies that SingleWhiteLabel mode
+// properly sets the tenant ID in context for all requests.
+func TestSingleWhiteLabelTenantContext(t *testing.T) {
+	const (
+		singleTenantID     = "single-brand"
+		singleTenantName   = "Single Brand Co"
+		singleExternalAddr = "https://console.singlebrand.com/"
+		sharedEmail        = "user@example.com"
+		password           = "password123"
+	)
+
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				// Configure SingleWhiteLabel mode - no multi-tenant config needed.
+				config.Console.SingleWhiteLabel = console.SingleWhiteLabelConfig{
+					WhiteLabelConfig: console.WhiteLabelConfig{
+						TenantID:        singleTenantID,
+						Name:            singleTenantName,
+						ExternalAddress: singleExternalAddr,
+					},
+				}
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		service := sat.API.Console.Service
+		usersDB := sat.DB.Console().Users()
+
+		// Create a variable for the tenant ID so we can take its address.
+		tenantIDStr := singleTenantID
+
+		t.Run("User created with SingleWhiteLabel tenant ID", func(t *testing.T) {
+			// In SingleWhiteLabel mode, all requests should use the configured tenant ID.
+			// Simulate a request coming through the middleware by setting context.
+			tenantCtx := tenancy.WithContext(ctx, &tenancy.Context{TenantID: singleTenantID})
+
+			user, err := service.CreateUser(tenantCtx, console.CreateUser{
+				FullName: "Single Brand User",
+				Email:    sharedEmail,
+				Password: password,
+			}, console.RegistrationSecret{})
+			require.NoError(t, err)
+			require.NotNil(t, user)
+			require.Equal(t, sharedEmail, user.Email)
+			require.NotNil(t, user.TenantID)
+			require.Equal(t, singleTenantID, *user.TenantID)
+		})
+
+		t.Run("User lookup uses SingleWhiteLabel tenant ID", func(t *testing.T) {
+			tenantCtx := tenancy.WithContext(ctx, &tenancy.Context{TenantID: singleTenantID})
+
+			// Look up user by email - should find the user created above.
+			user, unverified, err := usersDB.GetByEmailAndTenantWithUnverified(tenantCtx, sharedEmail, &tenantIDStr)
+			require.NoError(t, err)
+			// User was just created and not activated, so they're in the unverified list.
+			if user == nil {
+				require.Len(t, unverified, 1)
+				user = &unverified[0]
+			}
+			require.NotNil(t, user)
+			require.Equal(t, sharedEmail, user.Email)
+		})
+
+		t.Run("Different tenant context cannot find SingleWhiteLabel user", func(t *testing.T) {
+			differentTenantID := "other-tenant"
+			otherCtx := tenancy.WithContext(ctx, &tenancy.Context{TenantID: differentTenantID})
+
+			// Look up user with different tenant ID - should NOT find the user.
+			user, unverified, err := usersDB.GetByEmailAndTenantWithUnverified(otherCtx, sharedEmail, &differentTenantID)
+			require.NoError(t, err)
+			require.Nil(t, user)
+			require.Empty(t, unverified)
+		})
+	})
+}
+
+// TestSingleWhiteLabelBranding verifies that SingleWhiteLabel mode returns
+// the correct branding configuration.
+func TestSingleWhiteLabelBranding(t *testing.T) {
+	const (
+		singleTenantID     = "single-brand"
+		singleTenantName   = "Single Brand Corp"
+		singleSupportURL   = "https://support.singlebrand.com"
+		singleDocsURL      = "https://docs.singlebrand.com"
+		singleExternalAddr = "https://console.singlebrand.com/"
+	)
+
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				config.Console.SingleWhiteLabel = console.SingleWhiteLabelConfig{
+					WhiteLabelConfig: console.WhiteLabelConfig{
+						TenantID:        singleTenantID,
+						Name:            singleTenantName,
+						ExternalAddress: singleExternalAddr,
+						SupportURL:      singleSupportURL,
+						DocsURL:         singleDocsURL,
+					},
+				}
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+
+		t.Run("Branding endpoint returns SingleWhiteLabel config", func(t *testing.T) {
+			// Make request to branding endpoint.
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+				sat.ConsoleURL()+"/api/v0/config/branding", nil)
+			require.NoError(t, err)
+			req.Host = "localhost" // Any host should work in SingleWhiteLabel mode.
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			var branding map[string]interface{}
+			err = json.Unmarshal(body, &branding)
+			require.NoError(t, err)
+
+			require.Equal(t, singleTenantName, branding["name"])
+			require.Equal(t, singleSupportURL, branding["supportUrl"])
+			require.Equal(t, singleDocsURL, branding["docsUrl"])
+		})
+	})
+}

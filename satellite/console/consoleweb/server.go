@@ -283,7 +283,15 @@ func NewServer(logger *zap.Logger, config Config, service *console.Service, cons
 	// the earliest in the HTTP chain.
 	router.Use(newTraceRequestMiddleware(logger, router))
 
-	router.Use(tenancy.Middleware(config.WhiteLabel.HostNameIDLookup))
+	// Use SingleWhiteLabel tenant ID as default when enabled, otherwise fall back to hostname lookup.
+	defaultTenantID := ""
+	if config.SingleWhiteLabel.Enabled() {
+		if config.SingleWhiteLabel.TenantID == "" {
+			panic("SingleWhiteLabel is enabled but TenantID is not set")
+		}
+		defaultTenantID = config.SingleWhiteLabel.TenantID
+	}
+	router.Use(tenancy.Middleware(config.WhiteLabel.HostNameIDLookup, defaultTenantID))
 	router.Use(requestid.AddToContext)
 	// by default, set Cache-Control=no-store for all requests
 	// if requests should be cached (e.g. static assets), the cache control header can be overridden

@@ -149,52 +149,88 @@ func TestMiddleware(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		host           string
-		lookupMap      map[string]string
-		expectedTenant string
+		name            string
+		host            string
+		lookupMap       map[string]string
+		defaultTenantID string
+		expectedTenant  string
 	}{
+		// Tests without default tenant ID (multi-tenant mode).
 		{
-			name:           "customer-a hostname",
-			host:           "customer-a.example.com",
-			lookupMap:      lookupMap,
-			expectedTenant: "customer-a",
+			name:            "customer-a hostname",
+			host:            "customer-a.example.com",
+			lookupMap:       lookupMap,
+			defaultTenantID: "",
+			expectedTenant:  "customer-a",
 		},
 		{
-			name:           "customer-b hostname",
-			host:           "customer-b.example.com",
-			lookupMap:      lookupMap,
-			expectedTenant: "customer-b",
+			name:            "customer-b hostname",
+			host:            "customer-b.example.com",
+			lookupMap:       lookupMap,
+			defaultTenantID: "",
+			expectedTenant:  "customer-b",
 		},
 		{
-			name:           "hostname with port",
-			host:           "customer-a.example.com:8080",
-			lookupMap:      lookupMap,
-			expectedTenant: "customer-a",
+			name:            "hostname with port",
+			host:            "customer-a.example.com:8080",
+			lookupMap:       lookupMap,
+			defaultTenantID: "",
+			expectedTenant:  "customer-a",
 		},
 		{
-			name:           "unknown hostname",
-			host:           "unknown.example.com",
-			lookupMap:      lookupMap,
-			expectedTenant: "",
+			name:            "unknown hostname returns empty",
+			host:            "unknown.example.com",
+			lookupMap:       lookupMap,
+			defaultTenantID: "",
+			expectedTenant:  "",
 		},
 		{
-			name:           "localhost",
-			host:           "localhost:10100",
-			lookupMap:      lookupMap,
-			expectedTenant: "",
+			name:            "localhost returns empty",
+			host:            "localhost:10100",
+			lookupMap:       lookupMap,
+			defaultTenantID: "",
+			expectedTenant:  "",
 		},
 		{
-			name:           "nil lookupMap",
-			host:           "customer-a.example.com",
-			lookupMap:      nil,
-			expectedTenant: "",
+			name:            "nil lookupMap returns empty",
+			host:            "customer-a.example.com",
+			lookupMap:       nil,
+			defaultTenantID: "",
+			expectedTenant:  "",
+		},
+		// Tests with default tenant ID (single white label mode).
+		{
+			name:            "hostname match takes precedence over default",
+			host:            "customer-a.example.com",
+			lookupMap:       lookupMap,
+			defaultTenantID: "default-tenant",
+			expectedTenant:  "customer-a",
+		},
+		{
+			name:            "default used when no hostname match",
+			host:            "unknown.example.com",
+			lookupMap:       lookupMap,
+			defaultTenantID: "default-tenant",
+			expectedTenant:  "default-tenant",
+		},
+		{
+			name:            "default used when nil lookupMap",
+			host:            "any.example.com",
+			lookupMap:       nil,
+			defaultTenantID: "default-tenant",
+			expectedTenant:  "default-tenant",
+		},
+		{
+			name:            "default used for localhost",
+			host:            "localhost:10100",
+			lookupMap:       lookupMap,
+			defaultTenantID: "single-brand-tenant",
+			expectedTenant:  "single-brand-tenant",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a test handler that captures the tenant context.
 			var capturedTenantID string
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				tenantCtx := tenancy.GetContext(r.Context())
@@ -202,7 +238,7 @@ func TestMiddleware(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			})
 
-			middleware := tenancy.Middleware(tt.lookupMap)
+			middleware := tenancy.Middleware(tt.lookupMap, tt.defaultTenantID)
 			wrappedHandler := middleware(handler)
 
 			req := httptest.NewRequest(http.MethodGet, "/", nil)

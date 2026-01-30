@@ -266,6 +266,7 @@ type Service struct {
 	satelliteAddress string
 	satelliteName    string
 	whiteLabelConfig TenantWhiteLabelConfig
+	singleWhiteLabel SingleWhiteLabelConfig
 
 	config            Config
 	maxProjectBuckets int
@@ -329,7 +330,7 @@ func NewService(log *zap.Logger, store DB, restKeys restapikeys.DB, oauthRestKey
 	projectUsage *accounting.Service, buckets buckets.DB, attributions attribution.DB, accounts payments.Accounts, depositWallets payments.DepositWallets,
 	billingDb billing.TransactionsDB, analytics *analytics.Service, tokens *consoleauth.Service, mailService *mailservice.Service, hubspotMailService *hubspotmails.Service,
 	accountFreezeService *AccountFreezeService, emission *emission.Service, kmsService *kms.Service, ssoService *sso.Service, satelliteAddress string,
-	satelliteName string, whiteLabelConfig TenantWhiteLabelConfig, maxProjectBuckets int, ssoEnabled bool, placements nodeselection.PlacementDefinitions,
+	satelliteName string, whiteLabelConfig TenantWhiteLabelConfig, singleWhiteLabel SingleWhiteLabelConfig, maxProjectBuckets int, ssoEnabled bool, placements nodeselection.PlacementDefinitions,
 	valdiService *valdi.Service, minimumChargeAmount int64,
 	minimumChargeDate *time.Time, packagePlans map[string]payments.PackagePlan, entitlementsConfig entitlements.Config,
 	entitlementsService *entitlements.Service, placementProductMap map[int]int32, productConfigs map[int32]payments.ProductUsagePriceModel, config Config,
@@ -424,6 +425,7 @@ func NewService(log *zap.Logger, store DB, restKeys restapikeys.DB, oauthRestKey
 		satelliteAddress:           satelliteAddress,
 		satelliteName:              satelliteName,
 		whiteLabelConfig:           whiteLabelConfig,
+		singleWhiteLabel:           singleWhiteLabel,
 		maxProjectBuckets:          maxProjectBuckets,
 		ssoEnabled:                 ssoEnabled,
 		config:                     config,
@@ -458,6 +460,12 @@ func getRequestingIP(ctx context.Context) (source, forwardedFor string) {
 // If a tenant-specific external address is configured, it returns that; otherwise, it falls back
 // to the global satellite address.
 func (s *Service) getSatelliteAddress(ctx context.Context) string {
+	// Check single white label mode first.
+	if s.singleWhiteLabel.Enabled() && s.singleWhiteLabel.ExternalAddress != "" {
+		return s.singleWhiteLabel.ExternalAddress
+	}
+
+	// Multi-tenant lookup.
 	tenantID := tenancy.TenantIDFromContext(ctx)
 	if tenantID != "" {
 		if wlConfig, ok := s.whiteLabelConfig.Value[tenantID]; ok && wlConfig.ExternalAddress != "" {

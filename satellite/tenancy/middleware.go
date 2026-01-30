@@ -11,9 +11,10 @@ import (
 
 var mon = monkit.Package()
 
-// Middleware returns an HTTP middleware that extracts the Host header from each request,
-// resolves the tenant ID using the WhiteLabel config, and injects the tenant context into the request.
-func Middleware(lookupMap map[string]string) func(http.Handler) http.Handler {
+// Middleware returns an HTTP middleware that resolves tenant ID from the request hostname.
+// If defaultTenantID is provided (non-empty), it will be used when no hostname match is found.
+// This supports single white label deployments where all requests should use the same tenant ID.
+func Middleware(lookupMap map[string]string, defaultTenantID string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var err error
@@ -21,8 +22,13 @@ func Middleware(lookupMap map[string]string) func(http.Handler) http.Handler {
 
 			defer mon.Task()(&ctx)(&err)
 
+			tenantID := FromHostname(r.Host, lookupMap)
+			if tenantID == "" && defaultTenantID != "" {
+				tenantID = defaultTenantID
+			}
+
 			ctx = WithContext(ctx, &Context{
-				TenantID: FromHostname(r.Host, lookupMap),
+				TenantID: tenantID,
 			})
 
 			next.ServeHTTP(w, r.WithContext(ctx))
