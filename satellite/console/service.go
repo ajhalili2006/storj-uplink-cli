@@ -1259,9 +1259,11 @@ func (payment Payments) InvoiceHistory(ctx context.Context, cursor payments.Invo
 			Amount:      invoice.Amount,
 			Status:      invoice.Status,
 			Link:        invoice.Link,
+			PayLink:     invoice.PayLink,
 			End:         invoice.End,
 			Start:       invoice.Start,
 			Type:        Invoice,
+			Failed:      invoice.Failed,
 		})
 	}
 
@@ -1269,6 +1271,38 @@ func (payment Payments) InvoiceHistory(ctx context.Context, cursor payments.Invo
 		Items:    historyItems,
 		Next:     page.Next,
 		Previous: page.Previous,
+	}, nil
+}
+
+// GetFailedInvoice returns a single failed invoice.
+func (payment Payments) GetFailedInvoice(ctx context.Context) (_ *BillingHistoryItem, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	user, err := payment.service.getUserAndAuditLog(ctx, "get failed invoices")
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	invoice, err := payment.service.accounts.Invoices().GetFirstFailed(ctx, user.ID)
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	if invoice == nil {
+		return nil, ErrNotFound.New("no failed invoices found")
+	}
+
+	return &BillingHistoryItem{
+		ID:          invoice.ID,
+		Description: invoice.Description,
+		Amount:      invoice.Amount,
+		Status:      invoice.Status,
+		Link:        invoice.Link,
+		PayLink:     invoice.PayLink,
+		Start:       invoice.Start,
+		End:         invoice.End,
+		Type:        Invoice,
+		Failed:      true,
 	}, nil
 }
 

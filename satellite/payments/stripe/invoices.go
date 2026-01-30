@@ -110,6 +110,7 @@ func (invoices *invoices) Get(ctx context.Context, invoiceID string) (*payments.
 		Amount:      total,
 		Status:      convertStatus(inv.Status),
 		Link:        inv.InvoicePDF,
+		PayLink:     inv.HostedInvoiceURL,
 		Start:       time.Unix(inv.PeriodStart, 0),
 	}, nil
 }
@@ -340,7 +341,9 @@ func (invoices *invoices) List(ctx context.Context, userID uuid.UUID) (invoicesL
 			Amount:      total,
 			Status:      convertStatus(stripeInvoice.Status),
 			Link:        stripeInvoice.InvoicePDF,
+			PayLink:     stripeInvoice.HostedInvoiceURL,
 			Start:       time.Unix(stripeInvoice.PeriodStart, 0),
+			Failed:      invoices.isInvoiceFailed(stripeInvoice),
 		})
 	}
 
@@ -388,7 +391,9 @@ func (invoices *invoices) ListFailed(ctx context.Context, userID *uuid.UUID) (in
 				Amount:      total,
 				Status:      string(stripeInvoice.Status),
 				Link:        stripeInvoice.InvoicePDF,
+				PayLink:     stripeInvoice.HostedInvoiceURL,
 				Start:       time.Unix(stripeInvoice.PeriodStart, 0),
+				Failed:      true,
 			})
 		}
 	}
@@ -398,6 +403,58 @@ func (invoices *invoices) ListFailed(ctx context.Context, userID *uuid.UUID) (in
 	}
 
 	return invoicesList, nil
+}
+
+// GetFirstFailed returns the first failed invoice for the user.
+func (invoices *invoices) GetFirstFailed(ctx context.Context, userID uuid.UUID) (invoice *payments.Invoice, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	customerID, err := invoices.service.db.Customers().GetCustomerID(ctx, userID)
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	params := &stripe.InvoiceListParams{
+		ListParams: stripe.ListParams{Context: ctx},
+		Status:     stripe.String(string(stripe.InvoiceStatusOpen)),
+		Customer:   &customerID,
+	}
+
+	invoicesIterator := invoices.service.stripeClient.Invoices().List(params)
+	for invoicesIterator.Next() {
+		stripeInvoice := invoicesIterator.Invoice()
+
+		if invoices.isInvoiceFailed(stripeInvoice) {
+			total := stripeInvoice.Total
+			for _, line := range stripeInvoice.Lines.Data {
+				// If amount is negative, this is a coupon or a credit line item.
+				// Add them to the total.
+				if line.Amount < 0 {
+					total -= line.Amount
+				}
+			}
+
+			invoice = &payments.Invoice{
+				ID:          stripeInvoice.ID,
+				CustomerID:  stripeInvoice.Customer.ID,
+				Description: stripeInvoice.Description,
+				Amount:      total,
+				Status:      string(stripeInvoice.Status),
+				Link:        stripeInvoice.InvoicePDF,
+				PayLink:     stripeInvoice.HostedInvoiceURL,
+				Start:       time.Unix(stripeInvoice.PeriodStart, 0),
+				Failed:      true,
+			}
+
+			break
+		}
+	}
+
+	if err = invoicesIterator.Err(); err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	return invoice, nil
 }
 
 func (invoices *invoices) ListPaged(ctx context.Context, userID uuid.UUID, cursor payments.InvoiceCursor) (page *payments.InvoicePage, err error) {
@@ -477,8 +534,10 @@ func (invoices *invoices) ListPaged(ctx context.Context, userID uuid.UUID, curso
 			Amount:      total,
 			Status:      string(stripeInvoice.Status),
 			Link:        stripeInvoice.InvoicePDF,
+			PayLink:     stripeInvoice.HostedInvoiceURL,
 			Start:       start,
 			End:         end,
+			Failed:      invoices.isInvoiceFailed(stripeInvoice),
 		})
 	}
 
@@ -532,7 +591,9 @@ func (invoices *invoices) ListWithDiscounts(ctx context.Context, userID uuid.UUI
 			Amount:      total,
 			Status:      convertStatus(stripeInvoice.Status),
 			Link:        stripeInvoice.InvoicePDF,
+			PayLink:     stripeInvoice.HostedInvoiceURL,
 			Start:       time.Unix(stripeInvoice.PeriodStart, 0),
+			Failed:      invoices.isInvoiceFailed(stripeInvoice),
 		})
 
 		for _, dcAmt := range stripeInvoice.TotalDiscountAmounts {
@@ -614,6 +675,7 @@ func (invoices *invoices) Delete(ctx context.Context, id string) (_ *payments.In
 		Amount:      stripeInvoice.AmountDue,
 		Status:      convertStatus(stripeInvoice.Status),
 		Link:        stripeInvoice.InvoicePDF,
+		PayLink:     stripeInvoice.HostedInvoiceURL,
 		Start:       time.Unix(stripeInvoice.PeriodStart, 0),
 	}, nil
 }

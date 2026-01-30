@@ -8329,3 +8329,61 @@ func TestCreateUserWithTenantID(t *testing.T) {
 		require.NotNil(t, dbFreeUser.TrialExpiration)
 	})
 }
+
+func TestGetFailedInvoice(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: 0, UplinkCount: 1,
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		service := sat.API.Console.Service
+		stripeClient := sat.API.Payments.StripeClient
+		user := planet.Uplinks[0].Projects[0].Owner
+
+		// Get user context
+		userCtx, err := sat.UserContext(ctx, user.ID)
+		require.NoError(t, err)
+
+		invoice, err := service.Payments().GetFailedInvoice(userCtx)
+		require.Error(t, err) // Should return ErrNotFound
+		require.True(t, console.ErrNotFound.Has(err))
+		require.Nil(t, invoice)
+
+		customerID, err := sat.DB.StripeCoinPayments().Customers().GetCustomerID(ctx, user.ID)
+		require.NoError(t, err)
+
+		inv, err := stripeClient.Invoices().New(&stripeLib.InvoiceParams{
+			Params:   stripeLib.Params{Context: ctx},
+			Customer: &customerID,
+		})
+		require.NoError(t, err)
+
+		_, err = stripeClient.InvoiceItems().New(&stripeLib.InvoiceItemParams{
+			Params:   stripeLib.Params{Context: ctx},
+			Amount:   stripeLib.Int64(1000),
+			Currency: stripeLib.String(string(stripeLib.CurrencyUSD)),
+			Customer: &customerID,
+			Invoice:  stripeLib.String(inv.ID),
+		})
+		require.NoError(t, err)
+
+		inv, err = stripeClient.Invoices().FinalizeInvoice(inv.ID,
+			&stripeLib.InvoiceFinalizeInvoiceParams{Params: stripeLib.Params{Context: ctx}})
+		require.NoError(t, err)
+
+		// Attempt payment with failure payment method (should fail)
+		inv, err = stripeClient.Invoices().Pay(inv.ID,
+			&stripeLib.InvoicePayParams{
+				Params:        stripeLib.Params{Context: ctx},
+				PaymentMethod: stripeLib.String(stripe.MockInvoicesPayFailure),
+			})
+		require.Error(t, err) // Payment should fail
+		require.Equal(t, stripeLib.InvoiceStatusOpen, inv.Status)
+		require.True(t, inv.Attempted)
+
+		failedInvoice, err := service.Payments().GetFailedInvoice(userCtx)
+		require.NoError(t, err)
+		require.NotNil(t, failedInvoice)
+		require.Equal(t, inv.ID, failedInvoice.ID)
+		require.True(t, failedInvoice.Failed)
+	})
+}
