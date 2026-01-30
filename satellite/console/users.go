@@ -60,6 +60,8 @@ type Users interface {
 	DeleteUnverifiedBefore(ctx context.Context, before time.Time, asOfSystemTimeInterval time.Duration, pageSize int) error
 	// Update is a method for updating user entity.
 	Update(ctx context.Context, userID uuid.UUID, request UpdateUserRequest) error
+	// UpdateExternalIDWithActivationCode updates external ID and clears activation code atomically.
+	UpdateExternalIDWithActivationCode(ctx context.Context, userID uuid.UUID, activationCode, externalID string) (rowsAffected int64, err error)
 	// UpdatePaidTier sets whether the user is in the paid tier.
 	UpdatePaidTier(ctx context.Context, id uuid.UUID, paidTier bool, projectBandwidthLimit, projectStorageLimit memory.Size, projectSegmentLimit int64, projectLimit int, upgradeTime *time.Time) error
 	// UpdateUserAgent is a method to update the user's user agent.
