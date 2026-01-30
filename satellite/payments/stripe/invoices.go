@@ -6,6 +6,7 @@ package stripe
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/stripe/stripe-go/v81"
@@ -150,9 +151,100 @@ func (invoices *invoices) AttemptPayOverdueInvoices(ctx context.Context, userID 
 			return Error.Wrap(err)
 		}
 	}
+
+	if len(stripeInvoices) == 0 {
+		return nil
+	}
+
+	// check if customer has Stripe credit balance and apply it to invoices
+	customer, err := invoices.service.stripeClient.Customers().Get(customerID, &stripe.CustomerParams{Params: stripe.Params{Context: ctx}})
+	if err != nil {
+		invoices.service.log.Error("error getting stripe customer", zap.String("customerID", customerID), zap.Error(err))
+		return Error.Wrap(err)
+	}
+
+	if customer.Balance < 0 {
+		// customer.Balance < 0 means the customer has credit
+		err = invoices.attemptPayOverdueInvoicesWithStripeBalance(ctx, customer, stripeInvoices)
+		if err != nil {
+			return Error.Wrap(err)
+		}
+
+		// get invoices again to see if any are still unpaid
+		stripeInvoices, err = invoices.service.getInvoices(ctx, customerID, time.Unix(0, 0))
+		if err != nil {
+			return Error.Wrap(err)
+		}
+	}
+
 	if len(stripeInvoices) > 0 {
 		return invoices.attemptPayOverdueInvoicesWithCC(ctx, stripeInvoices)
 	}
+	return nil
+}
+
+// attemptPayOverdueInvoicesWithStripeBalance attempts to pay a user's open, overdue invoices with Stripe customer balance.
+func (invoices *invoices) attemptPayOverdueInvoicesWithStripeBalance(ctx context.Context, customer *stripe.Customer, stripeInvoices []stripe.Invoice) (err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	creditBalance := -customer.Balance
+
+	invoices.service.log.Info("applying stripe customer credit balance to invoices",
+		zap.String("customerID", customer.ID),
+		zap.Int64("creditBalance", creditBalance))
+
+	for _, inv := range stripeInvoices {
+		if creditBalance <= 0 {
+			break
+		}
+		if inv.AmountRemaining <= 0 {
+			// should not happen, but just in case
+			continue
+		}
+
+		amountToApply := creditBalance
+		if amountToApply > inv.AmountRemaining {
+			amountToApply = inv.AmountRemaining
+		}
+
+		_, err = invoices.service.stripeClient.CreditNotes().New(&stripe.CreditNoteParams{
+			Params:  stripe.Params{Context: ctx},
+			Invoice: stripe.String(inv.ID),
+			Lines: []*stripe.CreditNoteLineParams{{
+				Description: stripe.String("Stripe customer credit balance"),
+				Type:        stripe.String("custom_line_item"),
+				UnitAmount:  stripe.Int64(amountToApply),
+				Quantity:    stripe.Int64(1),
+			}},
+			Memo: stripe.String("Applied from Stripe customer credit balance"),
+		})
+		if err != nil {
+			invoices.service.log.Error("error creating credit note",
+				zap.String("customerID", customer.ID),
+				zap.String("invoiceID", inv.ID),
+				zap.Error(err))
+			continue
+		}
+
+		_, err = invoices.service.stripeClient.CustomerBalanceTransactions().New(&stripe.CustomerBalanceTransactionParams{
+			Params:      stripe.Params{Context: ctx},
+			Customer:    stripe.String(customer.ID),
+			Amount:      stripe.Int64(amountToApply), // positive = debit
+			Currency:    stripe.String(string(stripe.CurrencyUSD)),
+			Description: stripe.String(fmt.Sprintf("Applied to invoice %s", inv.ID)),
+		})
+		if err != nil {
+			invoices.service.log.Error("credit note created but failed to debit customer balance - customer received free credit",
+				zap.String("customerID", customer.ID),
+				zap.String("invoiceID", inv.ID),
+				zap.Int64("amount", amountToApply),
+				zap.Error(err))
+			continue
+		}
+
+		creditBalance -= amountToApply
+	}
+
 	return nil
 }
 
