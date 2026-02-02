@@ -9,7 +9,7 @@
             :link="ObjectMountApp.docs"
         />
 
-        <v-row class="mt-4">
+        <v-row class="mt-4 mb-6">
             <v-col cols="12" md="6" lg="6" xl="6">
                 <v-card class="px-1 py-3 h-100 align-content-space-between flex-grow-1 d-flex flex-column">
                     <v-card-item class="pb-0">
@@ -90,6 +90,9 @@
                 </v-card>
             </v-col>
         </v-row>
+
+        <PageTitleComponent title="Credentials" />
+        <AccessTableComponent :constant-search="ObjectMountApp.name" />
     </v-container>
 
     <AccessSetupDialog
@@ -124,6 +127,7 @@ import { usePreCheck } from '@/composables/usePreCheck';
 import PageSubtitleComponent from '@/components/PageSubtitleComponent.vue';
 import PageTitleComponent from '@/components/PageTitleComponent.vue';
 import AccessSetupDialog from '@/components/dialogs/AccessSetupDialog.vue';
+import AccessTableComponent from '@/components/AccessTableComponent.vue';
 
 import OMIcon from '@/assets/apps/objectmount.svg';
 
