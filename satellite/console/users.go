@@ -601,15 +601,13 @@ type UpsertUserSettingsRequest struct {
 
 // NoticeDismissal contains whether notices should be shown to a user.
 type NoticeDismissal struct {
-	FileGuide                        bool                        `json:"fileGuide"`
-	ServerSideEncryption             bool                        `json:"serverSideEncryption"`
-	PartnerUpgradeBanner             bool                        `json:"partnerUpgradeBanner"`
-	ProjectMembersPassphrase         bool                        `json:"projectMembersPassphrase"`
-	UploadOverwriteWarning           bool                        `json:"uploadOverwriteWarning"`
-	CunoFSBetaJoined                 bool                        `json:"cunoFSBetaJoined"`
-	ObjectMountConsultationRequested bool                        `json:"objectMountConsultationRequested"`
-	PlacementWaitlistsJoined         []storj.PlacementConstraint `json:"placementWaitlistsJoined"`
-	Announcements                    map[string]bool             `json:"announcements"`
+	FileGuide                bool                        `json:"fileGuide"`
+	ServerSideEncryption     bool                        `json:"serverSideEncryption"`
+	PartnerUpgradeBanner     bool                        `json:"partnerUpgradeBanner"`
+	ProjectMembersPassphrase bool                        `json:"projectMembersPassphrase"`
+	UploadOverwriteWarning   bool                        `json:"uploadOverwriteWarning"`
+	PlacementWaitlistsJoined []storj.PlacementConstraint `json:"placementWaitlistsJoined"`
+	Announcements            map[string]bool             `json:"announcements"`
 }
 
 // SetUpAccountRequest holds data for completing account setup.

@@ -306,52 +306,12 @@ type TrackCreateUserFields struct {
 	SignupCaptcha    *float64
 }
 
-// TrackJoinCunoFSBetaFields contains input data for tracking a join CunoFS beta event.
-type TrackJoinCunoFSBetaFields struct {
-	Email                       string `json:"email"`
-	CompanyName                 string `json:"companyName"`
-	FirstName                   string `json:"firstName"`
-	LastName                    string `json:"lastName"`
-	IndustryUseCase             string `json:"industryUseCase"`
-	OtherIndustryUseCase        string `json:"otherIndustryUseCase"`
-	OperatingSystem             string `json:"operatingSystem"`
-	TeamSize                    string `json:"teamSize"`
-	CurrentStorageUsage         string `json:"currentStorageUsage"`
-	InfraType                   string `json:"infraType"`
-	CurrentStorageBackends      string `json:"currentStorageBackends"`
-	OtherStorageBackend         string `json:"otherStorageBackend"`
-	CurrentStorageMountSolution string `json:"currentStorageMountSolution"`
-	OtherStorageMountSolution   string `json:"otherStorageMountSolution"`
-	DesiredFeatures             string `json:"desiredFeatures"`
-	CurrentPainPoints           string `json:"currentPainPoints"`
-	SpecificTasks               string `json:"specificTasks"`
-}
-
 // TrackJoinPlacementWaitlistFields contains input data for join placement waitlist event.
 type TrackJoinPlacementWaitlistFields struct {
 	Email        string                    `json:"email"`
 	StorageNeeds string                    `json:"storageNeeds"`
 	WaitlistURL  string                    `json:"-"`
 	Placement    storj.PlacementConstraint `json:"placement"`
-}
-
-// TrackObjectMountConsultationFields contains input data for tracking an object mount consultation event.
-type TrackObjectMountConsultationFields struct {
-	Email                  string  `json:"email"`
-	CompanyName            string  `json:"companyName"`
-	FirstName              string  `json:"firstName"`
-	LastName               string  `json:"lastName"`
-	JobTitle               string  `json:"jobTitle"`
-	PhoneNumber            string  `json:"phoneNumber"`
-	IndustryUseCase        string  `json:"industryUseCase"`
-	CompanySize            string  `json:"companySize"`
-	CurrentStorageSolution string  `json:"currentStorageSolution"`
-	KeyChallenges          string  `json:"keyChallenges"`
-	SpecificInterests      string  `json:"specificInterests"`
-	StorageNeeds           string  `json:"storageNeeds"`
-	ImplementationTimeline string  `json:"implementationTimeline"`
-	AdditionalInformation  string  `json:"additionalInformation"`
-	TenantID               *string `json:"-"`
 }
 
 // TrackOnboardingInfoFields contains input data entered after first login.
@@ -473,28 +433,12 @@ func (service *Service) TrackDeleteUser(userID uuid.UUID, email string, adminIni
 	})
 }
 
-// JoinCunoFSBeta sends a join cunoFS beta form to hubspot.
-func (service *Service) JoinCunoFSBeta(fields TrackJoinCunoFSBetaFields) {
-	if !service.config.Enabled {
-		return
-	}
-	service.hubspot.EnqueueJoinCunoFSBeta(fields)
-}
-
 // JoinPlacementWaitlist sends a join placement waitlist form to hubspot.
 func (service *Service) JoinPlacementWaitlist(fields TrackJoinPlacementWaitlistFields) {
 	if !service.config.Enabled {
 		return
 	}
 	service.hubspot.EnqueueJoinPlacementWaitlist(fields)
-}
-
-// RequestObjectMountConsultation sends an object mount consultation form to hubspot.
-func (service *Service) RequestObjectMountConsultation(fields TrackObjectMountConsultationFields) {
-	if !service.config.Enabled {
-		return
-	}
-	service.hubspot.EnqueueObjectMountConsultation(fields)
 }
 
 // ChangeContactEmail changes contact's email address.

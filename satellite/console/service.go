@@ -3901,51 +3901,6 @@ func (s *Service) GenGetUsersProjects(ctx context.Context) (ps []Project, httpEr
 	return
 }
 
-// JoinCunoFSBeta is a method for tracking user joined cunoFS beta.
-func (s *Service) JoinCunoFSBeta(ctx context.Context, data analytics.TrackJoinCunoFSBetaFields) (err error) {
-	defer mon.Task()(&ctx)(&err)
-
-	user, err := s.getUserAndAuditLog(ctx, "join cunoFS beta")
-	if err != nil {
-		return ErrUnauthorized.Wrap(err)
-	}
-
-	if user.Status == PendingBotVerification {
-		return ErrBotUser.New(contactSupportErrMsg)
-	}
-
-	settings, err := s.store.Users().GetSettings(ctx, user.ID)
-	if err != nil {
-		if !errs.Is(err, sql.ErrNoRows) {
-			return Error.Wrap(err)
-		}
-	}
-
-	var noticeDismissal NoticeDismissal
-	betaJoined := false
-	if settings != nil {
-		betaJoined = settings.NoticeDismissal.CunoFSBetaJoined
-		noticeDismissal = settings.NoticeDismissal
-	}
-	if betaJoined {
-		return ErrConflict.New("user already joined cunoFS beta")
-	}
-
-	data.Email = user.Email
-
-	s.analytics.JoinCunoFSBeta(data)
-
-	noticeDismissal.CunoFSBetaJoined = true
-	err = s.store.Users().UpsertSettings(ctx, user.ID, UpsertUserSettingsRequest{
-		NoticeDismissal: &noticeDismissal,
-	})
-	if err != nil {
-		return errs.Combine(Error.New("Your submission was successfully received, but something else went wrong"), err)
-	}
-
-	return nil
-}
-
 // SendUserFeedback is a method for tracking user feedback submission.
 func (s *Service) SendUserFeedback(ctx context.Context, data analytics.UserFeedbackFormData) (err error) {
 	defer mon.Task()(&ctx)(&err)
@@ -4022,52 +3977,6 @@ func (s *Service) JoinPlacementWaitlist(ctx context.Context, data analytics.Trac
 	s.analytics.JoinPlacementWaitlist(data)
 
 	noticeDismissal.PlacementWaitlistsJoined = append(noticeDismissal.PlacementWaitlistsJoined, storj.PlacementConstraint(placement.ID))
-	err = s.store.Users().UpsertSettings(ctx, user.ID, UpsertUserSettingsRequest{
-		NoticeDismissal: &noticeDismissal,
-	})
-	if err != nil {
-		return errs.Combine(Error.New("Your submission was successfully received, but something else went wrong"), err)
-	}
-
-	return nil
-}
-
-// RequestObjectMountConsultation is a method for tracking user requested object mount consultation.
-func (s *Service) RequestObjectMountConsultation(ctx context.Context, data analytics.TrackObjectMountConsultationFields) (err error) {
-	defer mon.Task()(&ctx)(&err)
-
-	user, err := s.getUserAndAuditLog(ctx, "request object mount consultation")
-	if err != nil {
-		return ErrUnauthorized.Wrap(err)
-	}
-
-	if user.Status == PendingBotVerification {
-		return ErrBotUser.New(contactSupportErrMsg)
-	}
-
-	settings, err := s.store.Users().GetSettings(ctx, user.ID)
-	if err != nil {
-		if !errs.Is(err, sql.ErrNoRows) {
-			return Error.Wrap(err)
-		}
-	}
-
-	var noticeDismissal NoticeDismissal
-	requested := false
-	if settings != nil {
-		requested = settings.NoticeDismissal.ObjectMountConsultationRequested
-		noticeDismissal = settings.NoticeDismissal
-	}
-	if requested {
-		return ErrConflict.New("user already requested object mount consultation")
-	}
-
-	data.Email = user.Email
-	data.TenantID = user.TenantID
-
-	s.analytics.RequestObjectMountConsultation(data)
-
-	noticeDismissal.ObjectMountConsultationRequested = true
 	err = s.store.Users().UpsertSettings(ctx, user.ID, UpsertUserSettingsRequest{
 		NoticeDismissal: &noticeDismissal,
 	})
