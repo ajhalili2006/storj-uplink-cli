@@ -4,7 +4,7 @@
 <template>
     <v-app>
         <auth-bar />
-        <default-view :class="{ 'signup-background': configStore.isDefaultBrand }" />
+        <app-view :class="{ 'signup-background': configStore.isDefaultBrand }" />
     </v-app>
 </template>
 
@@ -13,12 +13,12 @@ import { VApp } from 'vuetify/components';
 import { onBeforeMount } from 'vue';
 import { useRouter } from 'vue-router';
 
-import AuthBar from './AuthBar.vue';
-import DefaultView from './View.vue';
-
 import { useUsersStore } from '@/store/modules/usersStore';
 import { ROUTES } from '@/router';
 import { useConfigStore } from '@/store/modules/configStore';
+
+import AppView from '@/layouts/shared/View.vue';
+import AuthBar from '@/layouts/auth/AuthBar.vue';
 
 const usersStore = useUsersStore();
 const configStore = useConfigStore();

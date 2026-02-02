@@ -168,7 +168,7 @@ import { useUsersStore } from '@/store/modules/usersStore.js';
 import { ROUTES } from '@/router';
 import { AnalyticsEvent, PageVisitSource } from '@/utils/constants/analyticsEventNames.js';
 
-import NavigationItem from '@/layouts/default/NavigationItem.vue';
+import NavigationItem from '@/layouts/shared/NavigationItem.vue';
 
 const analyticsStore = useAnalyticsStore();
 const appStore = useAppStore();

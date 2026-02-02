@@ -788,7 +788,6 @@ onMounted(async (): Promise<void> => {
 
     const promises: Promise<void | ProjectMembersPage | AccessGrantsPage | AccountBalance | CreditCard[]>[] = [
         agStore.getAccessGrants(FIRST_PAGE, projectID),
-        bucketsStore.getBuckets(FIRST_PAGE, projectID),
     ];
 
     if (emissionImpactViewEnabled.value) {
@@ -802,10 +801,10 @@ onMounted(async (): Promise<void> => {
             billingStore.getCoupon(),
             billingStore.getProductUsageAndChargesCurrentRollup(),
         );
-    }
 
-    if (configStore.state.config.nativeTokenPaymentsEnabled && billingEnabled.value) {
-        promises.push(billingStore.getNativePaymentsHistory());
+        if (configStore.state.config.nativeTokenPaymentsEnabled) {
+            promises.push(billingStore.getNativePaymentsHistory());
+        }
     }
 
     try {

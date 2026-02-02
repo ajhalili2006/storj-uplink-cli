@@ -45,7 +45,7 @@ import { PaymentStatus, PaymentWithConfirmations } from '@/types/payments';
 import { DARK_THEME_QUERY, useThemeStore } from '@/store/modules/themeStore';
 import { ColorKey, FaviconKey, FrontendConfig } from '@/types/config';
 
-import Notifications from '@/layouts/default/Notifications.vue';
+import Notifications from '@/layouts/shared/Notifications.vue';
 import ErrorPage from '@/components/ErrorPage.vue';
 import BrandedLoader from '@/components/utils/BrandedLoader.vue';
 import TrialExpirationDialog from '@/components/dialogs/TrialExpirationDialog.vue';

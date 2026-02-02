@@ -2,43 +2,28 @@
 // See LICENSE for copying information.
 
 <template>
-    <v-app>
-        <branded-loader v-if="isLoading" />
-        <session-wrapper v-else>
-            <default-bar show-nav-drawer-button />
+    <app-shell :is-loading="isLoading">
+        <template #nav>
             <ProjectNav />
-            <default-view />
-
-            <UpgradeAccountDialog v-model="appStore.state.isUpgradeFlowDialogShown" :is-member-upgrade="isMemberAccount" />
-            <browser-snackbar-component />
-        </session-wrapper>
-    </v-app>
+        </template>
+    </app-shell>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeMount, ref, watch } from 'vue';
+import { onBeforeMount, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { VApp } from 'vuetify/components';
-
-import DefaultBar from './AppBar.vue';
-import ProjectNav from './ProjectNav.vue';
-import DefaultView from './View.vue';
 
 import { Project } from '@/types/projects';
 import { MINIMUM_URL_ID_LENGTH, useProjectsStore } from '@/store/modules/projectsStore';
-import { useAppStore } from '@/store/modules/appStore';
 import { useAccessGrantsStore } from '@/store/modules/accessGrantsStore';
 import { AnalyticsErrorEventSource } from '@/utils/constants/analyticsEventNames';
 import { useNotify } from '@/composables/useNotify';
 import { ROUTES } from '@/router';
 import { useBucketsStore } from '@/store/modules/bucketsStore';
 import { useAccessGrantWorker } from '@/composables/useAccessGrantWorker';
-import { useUsersStore } from '@/store/modules/usersStore';
 
-import SessionWrapper from '@/components/utils/SessionWrapper.vue';
-import UpgradeAccountDialog from '@/components/dialogs/upgradeAccountFlow/UpgradeAccountDialog.vue';
-import BrowserSnackbarComponent from '@/components/BrowserSnackbarComponent.vue';
-import BrandedLoader from '@/components/utils/BrandedLoader.vue';
+import ProjectNav from '@/layouts/project/ProjectNav.vue';
+import AppShell from '@/layouts/shared/AppShell.vue';
 
 const router = useRouter();
 const route = useRoute();
@@ -47,26 +32,22 @@ const { start } = useAccessGrantWorker();
 
 const bucketsStore = useBucketsStore();
 const projectsStore = useProjectsStore();
-const appStore = useAppStore();
 const agStore = useAccessGrantsStore();
-const usersStore = useUsersStore();
-
 const isLoading = ref<boolean>(true);
-
-const isMemberAccount = computed<boolean>(() => usersStore.state.user.isMember);
 
 /**
  * Selects the project with the given URL ID, redirecting to the
  * all projects dashboard if no such project exists.
  */
 async function selectProject(urlId: string): Promise<void> {
-    const goToDashboard = () => {
-        const path = ROUTES.Projects.path;
-        router.push(path);
-    };
-
     if (urlId.length < MINIMUM_URL_ID_LENGTH) {
-        goToDashboard();
+        await router.push(ROUTES.Projects.path);
+        return;
+    }
+
+    let project: Project | undefined = findProject(projectsStore.state.projects, urlId);
+    if (project) {
+        projectsStore.selectProject(project.id);
         return;
     }
 
@@ -74,11 +55,21 @@ async function selectProject(urlId: string): Promise<void> {
     try {
         projects = await projectsStore.getProjects();
     } catch {
-        goToDashboard();
+        await router.push(ROUTES.Projects.path);
         return;
     }
 
-    const project = projects.find(p => {
+    project = findProject(projects, urlId);
+    if (!project) {
+        await router.push(ROUTES.Projects.path);
+        return;
+    }
+
+    projectsStore.selectProject(project.id);
+}
+
+function findProject(projects: Project[], urlId: string): Project | undefined {
+    return projects.find(p => {
         let prefixEnd = 0;
         while (
             p.urlId[prefixEnd] === urlId[prefixEnd]
@@ -87,11 +78,6 @@ async function selectProject(urlId: string): Promise<void> {
         ) prefixEnd++;
         return prefixEnd === p.urlId.length || prefixEnd === urlId.length;
     });
-    if (!project) {
-        goToDashboard();
-        return;
-    }
-    projectsStore.selectProject(project.id);
 }
 
 watch(() => route.params.id, async newId => {

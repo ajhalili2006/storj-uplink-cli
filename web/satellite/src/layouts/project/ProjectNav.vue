@@ -363,7 +363,7 @@ import { ProjectRole } from '@/types/projectMembers';
 
 import CreateProjectDialog from '@/components/dialogs/CreateProjectDialog.vue';
 import ManagePassphraseDialog from '@/components/dialogs/ManagePassphraseDialog.vue';
-import NavigationItem from '@/layouts/default/NavigationItem.vue';
+import NavigationItem from '@/layouts/shared/NavigationItem.vue';
 import EnterProjectPassphraseDialog from '@/components/dialogs/EnterProjectPassphraseDialog.vue';
 import CloudGpuDialog from '@/components/dialogs/CloudGpuDialog.vue';
 

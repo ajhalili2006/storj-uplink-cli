@@ -112,7 +112,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
     VContainer,
     VRow,
@@ -294,5 +294,9 @@ onMounted(async () => {
     }
 
     isLoading.value = false;
+});
+
+onBeforeUnmount(() => {
+    appStore.toggleHasJustLoggedIn(false);
 });
 </script>

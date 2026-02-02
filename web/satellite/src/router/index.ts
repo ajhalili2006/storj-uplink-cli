@@ -92,7 +92,7 @@ const routes: RouteRecordRaw[] = [
     },
     {
         path: '/',
-        component: () => import('@/layouts/default/Auth.vue'),
+        component: () => import('@/layouts/auth/AuthLayout.vue'),
         children: [
             {
                 path: ROUTES.Login.path,
@@ -133,7 +133,7 @@ const routes: RouteRecordRaw[] = [
     },
     {
         path: ROUTES.Account.path,
-        component: () => import('@/layouts/default/Account.vue'),
+        component: () => import('@/layouts/account/AccountLayout.vue'),
         beforeEnter: (_, from) => useAppStore().setPathBeforeAccountPage(from.path),
         children: [
             {
@@ -159,7 +159,7 @@ const routes: RouteRecordRaw[] = [
     },
     {
         path: ROUTES.Projects.path,
-        component: () => import('@/layouts/default/AllProjects.vue'),
+        component: () => import('@/layouts/account/AccountLayout.vue'),
         children: [
             {
                 path: '',
@@ -170,7 +170,7 @@ const routes: RouteRecordRaw[] = [
     },
     {
         path: ROUTES.Projects.with(ROUTES.Project).path,
-        component: () => import('@/layouts/default/Default.vue'),
+        component: () => import('@/layouts/project/ProjectLayout.vue'),
         children: [
             {
                 path: '',
