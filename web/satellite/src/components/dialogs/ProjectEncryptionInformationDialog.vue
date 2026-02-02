@@ -47,7 +47,7 @@
                             <v-chip color="primary" value="auto" class="cursor-default" :disabled="encryption === 'manual'">
                                 Automatic
                             </v-chip>
-                            <v-chip color="primary" value="manual" class="cursor-default" :disabled="encryption === 'auto'">Manual</v-chip>
+                            <v-chip color="primary" value="manual" class="cursor-default" :disabled="encryption === 'auto'">Self-Managed</v-chip>
 
                             <v-divider thickness="0" class="my-1" />
 

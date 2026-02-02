@@ -156,7 +156,7 @@ export const MAX_DESCRIPTION_LENGTH = 100;
 
 export enum ProjectEncryption {
     Automatic = 'Automatic',
-    Manual = 'Manual',
+    Manual = 'Self-Managed',
 }
 
 /**

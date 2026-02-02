@@ -71,7 +71,7 @@
         </template>
 
         <template #item.encryption="{ item }">
-            <v-chip v-if="item.encryption" color="primary" variant="tonal" class="font-weight-bold" size="small">
+            <v-chip v-if="item.encryption" color="default" variant="tonal" class="font-weight-bold" size="small">
                 {{ item.encryption }}
             </v-chip>
         </template>
