@@ -17,7 +17,7 @@ import (
 	"storj.io/storj/satellite/entitlements"
 )
 
-func TestEndpoint_LicenseInfo(t *testing.T) {
+func TestEndpoint_AccountLicenses(t *testing.T) {
 	testplanet.Run(t, testplanet.Config{
 		SatelliteCount: 1, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
@@ -35,7 +35,7 @@ func TestEndpoint_LicenseInfo(t *testing.T) {
 		now := time.Now().Truncate(time.Second)
 
 		t.Run("no licenses", func(t *testing.T) {
-			response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: apiKey.SerializeRaw(),
 				},
@@ -77,7 +77,7 @@ func TestEndpoint_LicenseInfo(t *testing.T) {
 		require.NoError(t, entSvc.Licenses().Set(ctx, userID, licenses))
 
 		t.Run("get all licenses without filters", func(t *testing.T) {
-			response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: apiKey.SerializeRaw(),
 				},
@@ -93,7 +93,7 @@ func TestEndpoint_LicenseInfo(t *testing.T) {
 		})
 
 		t.Run("filter by license type", func(t *testing.T) {
-			response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: apiKey.SerializeRaw(),
 				},
@@ -106,7 +106,7 @@ func TestEndpoint_LicenseInfo(t *testing.T) {
 		})
 
 		t.Run("filter by bucket name", func(t *testing.T) {
-			response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: apiKey.SerializeRaw(),
 				},
@@ -123,7 +123,7 @@ func TestEndpoint_LicenseInfo(t *testing.T) {
 		})
 
 		t.Run("filter by both type and bucket", func(t *testing.T) {
-			response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: apiKey.SerializeRaw(),
 				},
@@ -137,7 +137,7 @@ func TestEndpoint_LicenseInfo(t *testing.T) {
 		})
 
 		t.Run("non-matching bucket returns project-wide licenses", func(t *testing.T) {
-			response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: apiKey.SerializeRaw(),
 				},
@@ -154,7 +154,7 @@ func TestEndpoint_LicenseInfo(t *testing.T) {
 		})
 
 		t.Run("non-matching type returns empty", func(t *testing.T) {
-			response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: apiKey.SerializeRaw(),
 				},
@@ -166,7 +166,7 @@ func TestEndpoint_LicenseInfo(t *testing.T) {
 		})
 
 		t.Run("expired licenses excluded", func(t *testing.T) {
-			response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: apiKey.SerializeRaw(),
 				},
@@ -178,7 +178,7 @@ func TestEndpoint_LicenseInfo(t *testing.T) {
 		})
 
 		t.Run("invalid api key", func(t *testing.T) {
-			_, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			_, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: []byte("invalid"),
 				},
@@ -188,7 +188,7 @@ func TestEndpoint_LicenseInfo(t *testing.T) {
 	})
 }
 
-func TestEndpoint_LicenseInfo_MultipleProjects(t *testing.T) {
+func TestEndpoint_AccountLicenses_MultipleProjects(t *testing.T) {
 	testplanet.Run(t, testplanet.Config{
 		SatelliteCount: 1, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
@@ -232,7 +232,7 @@ func TestEndpoint_LicenseInfo_MultipleProjects(t *testing.T) {
 
 		t.Run("project1 sees only project1 licenses", func(t *testing.T) {
 			apiKey1 := uplink.APIKey[sat.ID()]
-			response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: apiKey1.SerializeRaw(),
 				},
@@ -245,7 +245,7 @@ func TestEndpoint_LicenseInfo_MultipleProjects(t *testing.T) {
 		})
 
 		t.Run("project2 sees only project2 licenses", func(t *testing.T) {
-			response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+			response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 				Header: &pb.RequestHeader{
 					ApiKey: apiKey2.SerializeRaw(),
 				},
@@ -288,7 +288,7 @@ func TestEndpoint_LicenseInfo_ExpiresAtFormat(t *testing.T) {
 		}
 		require.NoError(t, entSvc.Licenses().Set(ctx, userID, licenses))
 
-		response, err := sat.Metainfo.Endpoint.LicenseInfo(ctx, &pb.LicenseInfoRequest{
+		response, err := sat.Metainfo.Endpoint.AccountLicenses(ctx, &pb.AccountLicensesRequest{
 			Header: &pb.RequestHeader{
 				ApiKey: apiKey.SerializeRaw(),
 			},
