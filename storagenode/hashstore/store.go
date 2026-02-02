@@ -218,7 +218,7 @@ func NewStore(
 				excluder = nil
 				break
 			}
-			return nil, Error.New("missing hashtbl when log files exist")
+			return nil, Error.New("missing hashtbl %q when log files exist in %q", maxTablePath, s.logsPath)
 		}
 
 		// atomically create an empty hashtbl.
