@@ -82,8 +82,6 @@ export class FrontendConfig {
     valdiSignUpURL: string;
     ssoEnabled: boolean;
     selfServePlacementSelectEnabled: boolean;
-    cunoFSBetaEnabled: boolean;
-    objectMountConsultationEnabled: boolean;
     csrfToken: string;
     billingStripeCheckoutEnabled: boolean;
     maxAddFundsAmount: number;

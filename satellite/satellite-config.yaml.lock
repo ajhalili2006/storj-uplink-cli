@@ -442,9 +442,6 @@ compensation.withheld-percents: 75,75,75,50,50,50,25,25,25,0,0,0,0,0,0
 # whether CSRF protection is enabled for some of the endpoints
 # console.csrf-protection-enabled: false
 
-# whether prompt to join cunoFS beta is visible
-# console.cuno-fs-beta-enabled: false
-
 # days left before trial end notification
 # console.days-before-trial-end-notification: 3
 
@@ -600,9 +597,6 @@ compensation.withheld-percents: 75,75,75,50,50,50,25,25,25,0,0,0,0,0,0
 
 # whether object lock UI should be shown, regardless of whether the feature is enabled
 # console.object-lock-ui-enabled: true
-
-# whether object mount consultation request form is visible
-# console.object-mount-consultation-enabled: false
 
 # enable open registration
 # console.open-registration-enabled: false

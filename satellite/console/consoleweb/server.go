@@ -129,8 +129,6 @@ type Config struct {
 	DomainsPageEnabled              bool          `help:"whether domains page should be shown" default:"false"`
 	ActiveSessionsViewEnabled       bool          `help:"whether active sessions table view should be shown" default:"false"`
 	ObjectLockUIEnabled             bool          `help:"whether object lock UI should be shown, regardless of whether the feature is enabled" default:"true"`
-	CunoFSBetaEnabled               bool          `help:"whether prompt to join cunoFS beta is visible" default:"false"`
-	ObjectMountConsultationEnabled  bool          `help:"whether object mount consultation request form is visible" default:"false"`
 	CSRFProtectionEnabled           bool          `help:"whether CSRF protection is enabled for some of the endpoints" default:"false" testDefault:"false"`
 	BillingStripeCheckoutEnabled    bool          `help:"whether billing stripe checkout feature is enabled" default:"false"`
 	DownloadPrefixEnabled           bool          `help:"whether prefix (bucket/folder) download is enabled" default:"false"`
@@ -1168,8 +1166,6 @@ func (server *Server) frontendConfigHandler(w http.ResponseWriter, r *http.Reque
 		ValdiSignUpURL:                    server.config.ValdiSignUpURL,
 		SsoEnabled:                        server.ssoEnabled,
 		SelfServePlacementSelectEnabled:   server.config.Placement.SelfServeEnabled,
-		CunoFSBetaEnabled:                 server.config.CunoFSBetaEnabled,
-		ObjectMountConsultationEnabled:    server.config.ObjectMountConsultationEnabled,
 		CSRFToken:                         csrfToken,
 		BillingStripeCheckoutEnabled:      server.config.BillingStripeCheckoutEnabled,
 		MaxAddFundsAmount:                 server.config.MaxAddFundsAmount,
