@@ -189,12 +189,17 @@ func Module(ball *mud.Ball) {
 	}
 
 	{ // setup trust pool
-		mud.Provide[*trust.Pool](ball, func(log *zap.Logger, satDb satellites.DB, dialer rpc.Dialer, config trust.Config) (*trust.Pool, error) {
+		mud.Provide[*trust.Pool](ball, func(ctx context.Context, log *zap.Logger, satDb satellites.DB, dialer rpc.Dialer, config trust.Config) (*trust.Pool, error) {
 			pool, err := trust.NewPool(log, trust.Dialer(dialer), config, satDb)
 			if err != nil {
 				return nil, err
 			}
-			pool.StartWithRefresh = true
+			// Refresh the trust pool immediately so satellites are available
+			// before other components (like HashStoreBackend) are initialized.
+			// The pool's Run() will handle periodic refreshes after startup.
+			if err := pool.Refresh(ctx); err != nil {
+				return nil, err
+			}
 			return pool, err
 		})
 		mud.RegisterInterfaceImplementation[trust.TrustedSatelliteSource, *trust.Pool](ball)
