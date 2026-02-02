@@ -6,38 +6,14 @@ package platform
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/zeebo/assert"
 )
 
-func TestMain(m *testing.M) {
-	if path := os.Getenv("STORJ_HASHSTORE_REMOVE_TEST"); path != "" {
-		if err := os.Remove(path); err != nil {
-			panic(err)
-		}
-		os.Exit(0)
-	}
-	if path := os.Getenv("STORJ_HASHSTORE_OPEN_TEST"); path != "" {
-		openHandleAndWait(path)
-		os.Exit(0)
-	}
-	os.Exit(m.Run())
-}
-
-func openHandleAndWait(path string) {
-	fh, err := OpenFileReadOnly(path)
-	if err != nil {
-		panic(err)
-	}
-	defer func() { _ = fh.Close() }()
-
-	_, _ = os.Stdout.Write(make([]byte, 1)) // signal that the file is open
-	_, _ = os.Stdin.Read(make([]byte, 1))   // wait for stdin to be closed
-}
-
 func TestRemoveWithOtherProcessOpenHandle(t *testing.T) {
-	path := t.TempDir() + "/testfile"
+	path := filepath.Join(t.TempDir(), "testfile")
 
 	// create the test file.
 	fh, err := CreateFile(path)
@@ -45,8 +21,7 @@ func TestRemoveWithOtherProcessOpenHandle(t *testing.T) {
 	assert.NoError(t, fh.Close())
 
 	// construct a command to hold open the file and wait for signals.
-	cmd := exec.Command(os.Args[0])
-	cmd.Env = []string{"STORJ_HASHSTORE_OPEN_TEST=" + path}
+	cmd := exec.Command("go", "run", "./testdata/fileop", "open-and-wait", path)
 	stdout, err := cmd.StdoutPipe()
 	assert.NoError(t, err)
 	stdin, err := cmd.StdinPipe()
@@ -75,11 +50,10 @@ func TestRemoveWithOtherProcessOpenHandle(t *testing.T) {
 }
 
 func TestOtherProcessRemoveWithOpenHandle(t *testing.T) {
-	path := t.TempDir() + "/testfile"
+	path := filepath.Join(t.TempDir(), "testfile")
 
 	remove := func() {
-		cmd := exec.Command(os.Args[0])
-		cmd.Env = []string{"STORJ_HASHSTORE_REMOVE_TEST=" + path}
+		cmd := exec.Command("go", "run", "./testdata/fileop", "remove", path)
 		output, err := cmd.CombinedOutput()
 		assert.Equal(t, string(output), "")
 		assert.NoError(t, err)
