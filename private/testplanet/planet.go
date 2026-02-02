@@ -324,6 +324,8 @@ func (planet *Planet) StopPeer(peer Peer) error {
 func (planet *Planet) StopNodeAndUpdate(ctx context.Context, node *StorageNode) (err error) {
 	defer mon.Task()(&ctx)(&err)
 
+	planet.Log().Info("Stopping node", zap.Stringer("node", node.ID()))
+
 	err = planet.StopPeer(node)
 	if err != nil {
 		return err

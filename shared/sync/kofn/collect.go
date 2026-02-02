@@ -23,6 +23,8 @@ type Result[T any] struct {
 type Config struct {
 	// Concurrency is the maximum number of concurrent operations.
 	Concurrency int
+	// LongTail is the number of extra concurrent operations beyond RequiredSuccesses to race for faster completion.
+	LongTail int
 	// RequiredSuccesses is the number of successful results required before stopping (K).
 	RequiredSuccesses int
 	// RequiredFailures is the number of failed results required before stopping.
@@ -55,6 +57,7 @@ func Collect[Req, Resp any](
 	}
 
 	state := &collectState[Req, Resp]{
+		longTail:          config.LongTail,
 		requiredSuccesses: config.RequiredSuccesses,
 		requiredFailures:  config.RequiredFailures,
 		pending:           pending,
@@ -63,7 +66,7 @@ func Collect[Req, Resp any](
 	}
 	state.cond.L = &state.mu
 
-	concurrency := min(config.Concurrency, pending)
+	concurrency := min(config.Concurrency+config.LongTail, pending)
 	limiter := sync2.NewLimiter(concurrency)
 
 	for index, item := range items {
@@ -85,6 +88,7 @@ type collectState[Req, Resp any] struct {
 	mu   sync.Mutex
 	cond sync.Cond
 
+	longTail          int
 	requiredSuccesses int
 	requiredFailures  int
 
@@ -123,10 +127,12 @@ func (s *collectState[Req, Resp]) run(ctx context.Context, index int, item Req) 
 			return
 		}
 
-		// Check if active workers could satisfy remaining requirements.
-		// If so, wait rather than starting more work unnecessarily.
-		if s.successCount+s.active >= s.requiredSuccesses &&
-			s.failureCount+s.active >= s.requiredFailures {
+		// Check if active workers already cover remaining requirements
+		// plus the long tail buffer. If so, wait rather than starting more work.
+		successRemaining := s.requiredSuccesses - s.successCount
+		failureRemaining := s.requiredFailures - s.failureCount
+		if s.active >= successRemaining+s.longTail &&
+			s.active >= failureRemaining+s.longTail {
 			s.cond.Wait()
 			continue
 		}

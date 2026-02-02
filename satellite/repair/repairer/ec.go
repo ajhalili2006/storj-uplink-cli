@@ -117,7 +117,8 @@ func (ec *ECRepairer) Get(ctx context.Context, log *zap.Logger, limits []*pb.Add
 		ctx,
 		kofn.Config{
 			// Allow more concurrent downloads than required for completion.
-			Concurrency:       es.RequiredCount() + ec.downloadLongTail,
+			Concurrency:       es.RequiredCount(),
+			LongTail:          ec.downloadLongTail,
 			RequiredSuccesses: es.RequiredCount(),
 			RequiredFailures:  ec.minFailures,
 		},

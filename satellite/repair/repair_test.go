@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -2465,13 +2466,17 @@ func getRemoteSegment(
 }
 
 type mockConnector struct {
-	realConnector   rpc.Connector
+	realConnector rpc.Connector
+	dialInstead   map[string]string
+
+	mu              sync.Mutex
 	addressesDialed []string
-	dialInstead     map[string]string
 }
 
 func (m *mockConnector) DialContext(ctx context.Context, tlsConfig *tls.Config, address string) (rpc.ConnectorConn, error) {
+	m.mu.Lock()
 	m.addressesDialed = append(m.addressesDialed, address)
+	m.mu.Unlock()
 	replacement := m.dialInstead[address]
 	if replacement == "" {
 		// allow numeric ip addresses through, return errors for unexpected dns lookups
@@ -2490,6 +2495,12 @@ func (m *mockConnector) DialContext(ctx context.Context, tlsConfig *tls.Config, 
 		replacement = address
 	}
 	return m.realConnector.DialContext(ctx, tlsConfig, replacement)
+}
+
+func (m *mockConnector) getAddressesDialed() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.addressesDialed...)
 }
 
 func ecRepairerWithMockConnector(t testing.TB, sat *testplanet.Satellite, mock *mockConnector) *repairer.ECRepairer {
@@ -2516,7 +2527,10 @@ func TestECRepairerGet(t *testing.T) {
 		StorageNodeCount: 6,
 		UplinkCount:      1,
 		Reconfigure: testplanet.Reconfigure{
-			Satellite: testplanet.ReconfigureRS(3, 3, 6, 6),
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				testplanet.ReconfigureRS(3, 3, 6, 6)(log, index, config)
+				config.Repairer.DownloadLongTail = 0
+			},
 		},
 		ExerciseJobq: true,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
@@ -2970,8 +2984,9 @@ func TestECRepairerGetDoesNameLookupIfNecessary(t *testing.T) {
 		// repair will only download minimum required
 		minReq := redundancy.RequiredCount()
 		var numDialed int
+		addressesDialed := mock.getAddressesDialed()
 		for _, info := range cachedNodesInfo {
-			for _, dialed := range mock.addressesDialed {
+			for _, dialed := range addressesDialed {
 				if dialed == info.LastIPPort {
 					numDialed++
 					if numDialed == minReq {
@@ -3056,8 +3071,9 @@ func TestECRepairerGetPrefersCachedIPPort(t *testing.T) {
 		// repair will only download minimum required.
 		minReq := redundancy.RequiredCount()
 		var numDialed int
+		addressesDialed := mock.getAddressesDialed()
 		for _, info := range cachedNodesInfo {
-			for _, dialed := range mock.addressesDialed {
+			for _, dialed := range addressesDialed {
 				if dialed == info.LastIPPort {
 					numDialed++
 					if numDialed == minReq {
@@ -3071,7 +3087,7 @@ func TestECRepairerGetPrefersCachedIPPort(t *testing.T) {
 		}
 		require.True(t, numDialed == minReq)
 		// and that the right address was never dialed directly
-		require.NotContains(t, mock.addressesDialed, realAddresses)
+		require.NotContains(t, addressesDialed, realAddresses)
 	})
 }
 
