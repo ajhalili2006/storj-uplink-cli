@@ -50,25 +50,25 @@ pipeline {
             parallel {
                 stage('web/satellite') {
                     steps {
-                        sh './web/satellite/build.sh'
+                        sh './web/satellite/check-and-build.sh'
                     }
                 }
 
                 stage('web/storagenode') {
                     steps {
-                        sh './web/storagenode/build.sh'
+                        sh './web/storagenode/check-and-build.sh'
                     }
                 }
 
                 stage('web/multinode') {
                     steps {
-                        sh './web/multinode/build.sh'
+                        sh './web/multinode/check-and-build.sh'
                     }
                 }
 
                 stage('satellite/admin/legacy/ui') {
                     steps {
-                        sh './satellite/admin/legacy/ui/build.sh'
+                        sh './satellite/admin/legacy/ui/check-and-build.sh'
                     }
                 }
             }

@@ -1,6 +1,6 @@
 module storj.io/storj/web/satellite/wasm
 
-go 1.24.7
+go 1.25
 
 require (
 	github.com/stretchr/testify v1.11.1
