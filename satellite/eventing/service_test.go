@@ -87,14 +87,13 @@ func TestProcessRecord(t *testing.T) {
 				projectSet[id] = struct{}{}
 			}
 
-			service, err := eventing.NewService(testplanet.NewLogger(t), adapter, cache, &TestPublicProjectIDs{}, eventingconfig.Config{
+			service := eventing.NewService(testplanet.NewLogger(t), adapter, cache, &TestPublicProjectIDs{}, eventingconfig.Config{
 				Projects: projectSet,
 			}, eventing.Config{
 				TestNewPublisherFn: func() (eventing.Publisher, error) {
 					return eventing.NewLogPublisher(observedLogger), nil
 				},
 			})
-			require.NoError(t, err)
 
 			return service, observedLogs
 		}
@@ -246,7 +245,7 @@ func TestGetPublisher_TopicChange(t *testing.T) {
 	// Track how many times the publisher factory is called
 	publisherCallCount := 0
 
-	service, err := eventing.NewService(observedLogger, nil, cache, &TestPublicProjectIDs{}, eventingconfig.Config{
+	service := eventing.NewService(observedLogger, nil, cache, &TestPublicProjectIDs{}, eventingconfig.Config{
 		Projects: eventingconfig.ProjectSet{
 			eventing.TestProjectID: {},
 		},
@@ -256,7 +255,6 @@ func TestGetPublisher_TopicChange(t *testing.T) {
 			return eventing.NewLogPublisher(observedLogger), nil
 		},
 	})
-	require.NoError(t, err)
 
 	// Get publisher with @log topic (LogPublisher always returns "@log" as topic name)
 	topic1 := "@log"

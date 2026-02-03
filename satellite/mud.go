@@ -225,9 +225,6 @@ func Module(ball *mud.Ball) {
 	mud.View[DB, snopayouts.DB](ball, DB.SNOPayouts)
 
 	mud.Provide[*metainfo.MigrationModeFlagExtension](ball, metainfo.NewMigrationModeFlagExtension)
-	mud.Provide[eventingconfig.BucketLocationTopicIDMap](ball, func(config eventingconfig.Config) eventingconfig.BucketLocationTopicIDMap {
-		return config.Buckets
-	})
 	mud.Provide[*EndpointRegistration](ball, func(srv *server.Server,
 		metainfoEndpoint *metainfo.Endpoint,
 		endpoint *contact.Endpoint,

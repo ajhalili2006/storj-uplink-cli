@@ -55,8 +55,8 @@ type Service struct {
 }
 
 // NewService creates a new changestream service.
-func NewService(log *zap.Logger, sdb changestream.Adapter, buckets BucketNotificationConfigGetter, projects PublicProjectIDGetter, enabled eventingconfig.Config, cfg Config) (*Service, error) {
-	service := &Service{
+func NewService(log *zap.Logger, sdb changestream.Adapter, buckets BucketNotificationConfigGetter, projects PublicProjectIDGetter, enabled eventingconfig.Config, cfg Config) *Service {
+	return &Service{
 		log:        log,
 		db:         sdb,
 		buckets:    buckets,
@@ -65,16 +65,6 @@ func NewService(log *zap.Logger, sdb changestream.Adapter, buckets BucketNotific
 		cfg:        cfg,
 		publishers: make(map[metabase.BucketLocation]Publisher),
 	}
-
-	// Validate configured topic names
-	for _, topicName := range enabled.Buckets {
-		_, _, err := ParseTopicName(topicName)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return service, nil
 }
 
 // Run starts the changestream processing loop.
