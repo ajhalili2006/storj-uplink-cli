@@ -307,7 +307,7 @@ import {
 import { useProjectsStore } from '@/store/modules/projectsStore';
 import { useNotify } from '@/composables/useNotify';
 import { Size } from '@/utils/bytesSize';
-import { AnalyticsErrorEventSource } from '@/utils/constants/analyticsEventNames';
+import { AnalyticsErrorEventSource, AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
 import { useBucketsStore } from '@/store/modules/bucketsStore';
 import {
     BrowserObjectTypeInfo,
@@ -324,6 +324,7 @@ import { DataTableHeader } from '@/types/common';
 import { usePreCheck } from '@/composables/usePreCheck';
 import { useConfigStore } from '@/store/modules/configStore';
 import { useLoading } from '@/composables/useLoading';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import BrowserRowActions from '@/components/BrowserRowActions.vue';
 import FilePreviewDialog from '@/components/dialogs/FilePreviewDialog.vue';
@@ -351,6 +352,7 @@ const obStore = useObjectBrowserStore();
 const projectsStore = useProjectsStore();
 const bucketsStore = useBucketsStore();
 const configStore = useConfigStore();
+const analyticsStore = useAnalyticsStore();
 
 const notify = useNotify();
 const router = useRouter();
@@ -677,6 +679,8 @@ function onFileClick(file: BrowserObject): void {
             const parentFile = allFiles.value.find(f => f.browserObject.Key === file.Key && f.browserObject.path === file.path);
             fileVersionsToPreview.value = parentFile?.browserObject?.Versions?.filter(v => !v.isDeleteMarker);
             previewDialog.value = true;
+
+            analyticsStore.eventTriggered(AnalyticsEvent.GALLERY_VIEW_CLICKED);
         });
     });
 }

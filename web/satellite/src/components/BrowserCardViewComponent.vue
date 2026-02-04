@@ -15,7 +15,6 @@
                     hide-details
                     clearable
                     density="comfortable"
-                    @update:model-value="analyticsStore.eventTriggered(AnalyticsEvent.SEARCH_BUCKETS)"
                 />
             </v-col>
             <v-col cols="12" sm="auto" class="d-flex align-center">
@@ -206,8 +205,9 @@ import { useRouter } from 'vue-router';
 import {
     VBtn,
     VBtnToggle,
-    VCol,
     VCard,
+    VCol,
+    VDataIterator,
     VIcon,
     VList,
     VListItem,
@@ -215,9 +215,16 @@ import {
     VRow,
     VSpacer,
     VTextField,
-    VDataIterator,
 } from 'vuetify/components';
-import { ChevronLeft, ChevronRight, Search, ChevronDown, ArrowDownNarrowWide, ArrowUpNarrowWide, ArrowUpDown } from 'lucide-vue-next';
+import {
+    ArrowDownNarrowWide,
+    ArrowUpDown,
+    ArrowUpNarrowWide,
+    ChevronDown,
+    ChevronLeft,
+    ChevronRight,
+    Search,
+} from 'lucide-vue-next';
 
 import {
     BrowserObject,
@@ -297,6 +304,7 @@ const isLockedObjectDeleteDialogShown = ref<boolean>(false);
 const routePageCache = new Map<string, number>();
 const isDownloadPrefixDialogShown = ref<boolean>(false);
 const folderToDownload = ref<string>('');
+const searchTimer = ref<NodeJS.Timeout>();
 
 let previewQueue: BrowserObjectWrapper[] = [];
 let processingPreview = false;
@@ -581,6 +589,8 @@ function onFileClick(file: BrowserObject): void {
             obStore.setObjectPathForModal((file.path ?? '') + file.Key);
             fileToPreview.value = file;
             previewDialog.value = true;
+
+            analyticsStore.eventTriggered(AnalyticsEvent.GALLERY_VIEW_CLICKED);
         });
     });
 }
@@ -782,6 +792,14 @@ watch(allFiles, async (value, oldValue) => {
         addToPreviewQueue(file);
     }
 }, { immediate: true });
+
+watch(() => search.value, () => {
+    clearTimeout(searchTimer.value);
+
+    searchTimer.value = setTimeout(() => {
+        analyticsStore.eventTriggered(AnalyticsEvent.SEARCH_BUCKETS);
+    }, 500); // 500ms delay for every new call.
+});
 
 onBeforeUnmount(() => {
     obStore.setCursor({ page: 1, limit: DEFAULT_PAGE_LIMIT });

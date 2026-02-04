@@ -35,6 +35,7 @@
                     color="default"
                     size="small"
                     :href="item.link"
+                    @click="onDownloadInvoiceClicked"
                 >
                     Invoice
                 </v-btn>
@@ -81,30 +82,24 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import {
-    VBtn,
-    VBtnGroup,
-    VChip,
-    VCol,
-    VRow,
-    VSelect,
-    VDataTableServer,
-} from 'vuetify/components';
+import { VBtn, VBtnGroup, VChip, VCol, VDataTableServer, VRow, VSelect } from 'vuetify/components';
 import { ChevronLeft, ChevronRight, DownloadIcon } from 'lucide-vue-next';
 
 import { centsToDollars } from '@/utils/strings';
 import { useBillingStore } from '@/store/modules/billingStore';
 import { useNotify } from '@/composables/useNotify';
-import { AnalyticsErrorEventSource } from '@/utils/constants/analyticsEventNames';
+import { AnalyticsErrorEventSource, AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
 import { PaymentHistoryPage, PaymentsHistoryItem } from '@/types/payments';
 import { useLoading } from '@/composables/useLoading';
 import { DEFAULT_PAGE_LIMIT } from '@/types/pagination';
 import { DataTableHeader } from '@/types/common';
 import { useProjectsStore } from '@/store/modules/projectsStore';
 import { Download } from '@/utils/download';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 const billingStore = useBillingStore();
 const projectsStore = useProjectsStore();
+const analyticsStore = useAnalyticsStore();
 
 const notify = useNotify();
 
@@ -166,6 +161,10 @@ async function previousClicked(): Promise<void> {
 async function sizeChanged(size: number) {
     limit.value = size;
     fetchHistory();
+}
+
+function onDownloadInvoiceClicked(): void {
+    analyticsStore.eventTriggered(AnalyticsEvent.INVOICE_DOWNLOAD_CLICKED);
 }
 
 function downloadUsageReport(item: PaymentsHistoryItem): void {

@@ -155,7 +155,7 @@
                             </tbody>
                         </v-table>
                     </div>
-                    <v-btn v-if="project" :prepend-icon="Calendar" class="mt-2">
+                    <v-btn v-if="project" :prepend-icon="Calendar" class="mt-2" @click="detailedUsageClicked">
                         <detailed-usage-report-dialog :project />
                         Detailed Project Report
                     </v-btn>
@@ -188,6 +188,8 @@ import { SHORT_MONTHS_NAMES } from '@/utils/constants/date';
 import { useBillingStore } from '@/store/modules/billingStore';
 import { useProjectsStore } from '@/store/modules/projectsStore';
 import { Duration } from '@/utils/time';
+import { AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import DetailedUsageReportDialog from '@/components/dialogs/DetailedUsageReportDialog.vue';
 import IconProjectTonal from '@/components/icons/IconProjectTonal.vue';
@@ -209,6 +211,7 @@ const props = withDefaults(defineProps<{
 
 const billingStore = useBillingStore();
 const projectsStore = useProjectsStore();
+const analyticsStore = useAnalyticsStore();
 
 /**
  * An array of tuples containing the partner name and usage charge for the specified project ID.
@@ -238,6 +241,10 @@ const projectName = computed((): string => {
  * Returns product usage price model from store.
  */
 const productCharges = computed<ProductCharges>(() => billingStore.state.productCharges as ProductCharges);
+
+function detailedUsageClicked(): void {
+    analyticsStore.eventTriggered(AnalyticsEvent.USAGE_DETAILED_INFO_CLICKED);
+}
 
 /**
  * Returns product name by product ID.

@@ -14,7 +14,6 @@
         clearable
         density="comfortable"
         class="mb-5"
-        @update:model-value="analyticsStore.eventTriggered(AnalyticsEvent.SEARCH_BUCKETS)"
     />
 
     <v-data-table-server
@@ -303,6 +302,7 @@ const isLockedObjectDeleteDialogShown = ref<boolean>(false);
 const routePageCache = new Map<string, number>();
 const isDownloadPrefixDialogShown = ref<boolean>(false);
 const folderToDownload = ref<string>('');
+const searchTimer = ref<NodeJS.Timeout>();
 
 const pageSizes = [DEFAULT_PAGE_LIMIT, 25, 50, 100, 500];
 const sortBy: SortItem[] = [{ key: 'name', order: 'asc' }];
@@ -608,6 +608,8 @@ function onFileClick(file: BrowserObject): void {
             obStore.setObjectPathForModal((file.path ?? '') + file.Key);
             fileToPreview.value = file;
             previewDialog.value = true;
+
+            analyticsStore.eventTriggered(AnalyticsEvent.GALLERY_VIEW_CLICKED);
         });
     });
 }
@@ -716,6 +718,14 @@ watch(filePath, () => {
 }, { immediate: true });
 
 watch(() => props.forceEmpty, v => !v && fetchFiles());
+
+watch(() => search.value, () => {
+    clearTimeout(searchTimer.value);
+
+    searchTimer.value = setTimeout(() => {
+        analyticsStore.eventTriggered(AnalyticsEvent.SEARCH_BUCKETS);
+    }, 500); // 500ms delay for every new call.
+});
 
 defineExpose({
     refresh: async () => {
