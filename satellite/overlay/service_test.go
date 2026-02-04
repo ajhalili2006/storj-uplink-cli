@@ -317,6 +317,10 @@ func TestGetNodes(t *testing.T) {
 					OfflineDQEnabled:         false,
 					OfflineSuspensionEnabled: true,
 				}
+				// Disable stray node disqualification because the test sets
+				// last_contact_success to 1 hour ago, which exceeds the test
+				// default MaxDurationWithoutContact of 5 minutes.
+				config.StrayNodes.EnableDQ = false
 			},
 		},
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
@@ -765,6 +769,7 @@ func TestUpdateCheckInNodeEventOnline(t *testing.T) {
 			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
 				config.Overlay.SendNodeEmails = true
 				config.Overlay.Node.OnlineWindow = 4 * time.Hour
+				config.StrayNodes.EnableDQ = false
 			},
 		},
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
