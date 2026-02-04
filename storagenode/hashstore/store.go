@@ -1612,6 +1612,7 @@ func (s *Store) reconcileLog(ctx context.Context, id uint64, lf *logFile) (_ []K
 		// because the table is no longer in use, and removing the file is best effort.
 		_ = s.tbl.Close()
 		_ = os.Remove(strings.TrimSuffix(s.tbl.Handle().Name(), ".tmp"))
+		syncDirectory(s.tablePath)
 
 		s.tbl = ntbl
 	}
@@ -1654,6 +1655,7 @@ func (s *Store) doubleTableSize(ctx context.Context) (err error) {
 	// because the table is no longer in use, and removing the file is best effort.
 	_ = s.tbl.Close()
 	_ = os.Remove(strings.TrimSuffix(s.tbl.Handle().Name(), ".tmp"))
+	syncDirectory(s.tablePath)
 
 	s.tbl = ntbl
 
