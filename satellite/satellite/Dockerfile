@@ -1,4 +1,4 @@
-ARG GO_VERSION=1.25.6
+ARG GO_VERSION=1.25.7
 
 FROM debian:bookworm-slim AS base
 RUN apt-get update
@@ -26,9 +26,9 @@ ARG BUILD_DATE
 ARG BUILD_COMMIT
 RUN --mount=type=cache,target="/root/.cache/go-build" \
     go install -ldflags "-X storj.io/common/version.buildRelease=true \
-      -X storj.io/common/version.buildVersion=$BUILD_VERSION \
-      -X storj.io/common/version.buildCommitHash=$BUILD_COMMIT \
-      -X storj.io/common/version.buildTimestamp=$BUILD_DATE" ./satellite/satellite
+    -X storj.io/common/version.buildVersion=$BUILD_VERSION \
+    -X storj.io/common/version.buildCommitHash=$BUILD_COMMIT \
+    -X storj.io/common/version.buildTimestamp=$BUILD_DATE" ./satellite/satellite
 
 FROM base AS build
 ENV STORJ_CONSOLE_BAD_PASSWORDS_FILE=/etc/seclist/bad-passwords.txt
