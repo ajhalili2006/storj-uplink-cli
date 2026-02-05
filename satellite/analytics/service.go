@@ -117,6 +117,7 @@ const (
 	eventCloudGPUSignupClicked          = "Cloud GPU Sign Up Clicked"
 	eventJoinPlacementWaitlistSubmitted = "Join Placement Waitlist Form Submitted"
 	eventAdmitAudit                     = "Admin Audit Event"
+	eventDownloadPrefixInitiated        = "Download Prefix Initiated"
 	// EventUserFeedbackSubmitted is an event for user feedback submission.
 	// Exported to be reused in other packages.
 	EventUserFeedbackSubmitted = "User Feedback Submitted"
@@ -224,7 +225,7 @@ func NewService(log *zap.Logger, config Config, satelliteName, satelliteExternal
 		eventUserSignUp, eventPersonalInfoSubmitted, eventBusinessInfoSubmitted, eventOnboardingCompleted, eventOnboardingAbandoned,
 		eventUserUpgraded, eventUpgradeClicked, eventArrivedFromSource, eventApplicationsDocsClicked, eventApplicationsSetupClicked,
 		eventApplicationsSetupCompleted, eventCloudGPUNavigationClicked, eventCloudGPUSignupClicked,
-		eventJoinPlacementWaitlistSubmitted, EventUserFeedbackSubmitted} {
+		eventJoinPlacementWaitlistSubmitted, EventUserFeedbackSubmitted, eventDownloadPrefixInitiated} {
 		service.clientEvents[name] = true
 	}
 

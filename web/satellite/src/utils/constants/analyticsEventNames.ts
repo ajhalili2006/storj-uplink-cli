@@ -60,6 +60,7 @@ export enum AnalyticsEvent {
     CLOUD_GPU_NAVIGATION_ITEM_CLICKED = 'Cloud GPU Navigation Item Clicked',
     CLOUD_GPU_SIGN_UP_CLICKED = 'Cloud GPU Sign Up Clicked',
     JOIN_PLACEMENT_WAITLIST_FORM_SUBMITTED = 'Join Placement Waitlist Form Submitted',
+    DOWNLOAD_PREFIX_INITIATED = 'Download Prefix Initiated',
 }
 
 export enum AnalyticsErrorEventSource {
