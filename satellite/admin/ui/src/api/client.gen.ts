@@ -7,6 +7,7 @@ import { Time, UUID } from '@/types/common';
 export class AccountFlags {
     create: boolean;
     createRestKey: boolean;
+    createRegToken: boolean;
     delete: boolean;
     markPendingDeletion: boolean;
     history: boolean;
@@ -85,6 +86,15 @@ export class ChangeLog {
     operation: string;
     changes: Record<string, unknown> | null;
     timestamp: Time;
+}
+
+export class CreateRegistrationTokenRequest {
+    projectLimit: number;
+    reason: string;
+}
+
+export class CreateRegistrationTokenResponse {
+    token: string;
 }
 
 export class CreateRestKeyRequest {
@@ -309,10 +319,15 @@ export class SearchResult {
 
 export class Settings {
     admin: SettingsAdmin;
+    console: SettingsConsole;
 }
 
 export class SettingsAdmin {
     features: FeatureFlags;
+}
+
+export class SettingsConsole {
+    externalAddress: string;
 }
 
 export class ToggleFreezeUserRequest {
@@ -603,6 +618,16 @@ export class UserManagementHttpApiV1 {
         const response = await this.http.post(fullPath, JSON.stringify(request));
         if (response.ok) {
             return response.json().then((body) => body as string);
+        }
+        const err = await response.json();
+        throw new APIError(err.error, response.status);
+    }
+
+    public async createRegistrationToken(request: CreateRegistrationTokenRequest): Promise<CreateRegistrationTokenResponse> {
+        const fullPath = `${this.ROOT_PATH}/registration-tokens`;
+        const response = await this.http.post(fullPath, JSON.stringify(request));
+        if (response.ok) {
+            return response.json().then((body) => body as CreateRegistrationTokenResponse);
         }
         const err = await response.json();
         throw new APIError(err.error, response.status);
