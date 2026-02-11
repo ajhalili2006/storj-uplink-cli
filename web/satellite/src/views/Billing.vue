@@ -3,12 +3,6 @@
 
 <template>
     <v-container>
-        <low-token-balance-banner
-            v-if="isLowBalance"
-            :cta-label="tab !== TABS['payment-methods'] ? 'Deposit' : ''"
-            @click="onAddTokensClicked"
-        />
-
         <v-row>
             <v-col>
                 <PageTitleComponent title="Account Billing" />
@@ -289,13 +283,12 @@ import { ArrowRight, Calendar, Info, Plus } from 'lucide-vue-next';
 import { useLoading } from '@/composables/useLoading';
 import { useNotify } from '@/composables/useNotify';
 import { useBillingStore } from '@/store/modules/billingStore';
-import { AccountBalance, Coupon, CouponDuration, CreditCard } from '@/types/payments';
+import { Coupon, CouponDuration, CreditCard } from '@/types/payments';
 import { centsToDollars } from '@/utils/strings';
 import { AnalyticsErrorEventSource, AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
 import { SHORT_MONTHS_NAMES } from '@/utils/constants/date';
 import { useProjectsStore } from '@/store/modules/projectsStore';
 import { MinimumCharge, useConfigStore } from '@/store/modules/configStore';
-import { useLowTokenBalance } from '@/composables/useLowTokenBalance';
 import { ROUTES } from '@/router';
 import { useUsersStore } from '@/store/modules/usersStore';
 import { useAppStore } from '@/store/modules/appStore';
@@ -309,7 +302,6 @@ import UsageAndChargesComponent from '@/components/billing/UsageAndChargesCompon
 import StorjTokenCardComponent from '@/components/StorjTokenCardComponent.vue';
 import TokenTransactionsTableComponent from '@/components/TokenTransactionsTableComponent.vue';
 import ApplyCouponCodeDialog from '@/components/dialogs/ApplyCouponCodeDialog.vue';
-import LowTokenBalanceBanner from '@/components/LowTokenBalanceBanner.vue';
 import DetailedUsageReportDialog from '@/components/dialogs/DetailedUsageReportDialog.vue';
 import BillingInformationTab from '@/components/billing/BillingInformationTab.vue';
 import AddFundsDialog from '@/components/dialogs/AddFundsDialog.vue';
@@ -337,7 +329,6 @@ const { isLoading, withLoading } = useLoading();
 const notify = useNotify();
 const router = useRouter();
 const route = useRoute();
-const isLowBalance = useLowTokenBalance();
 
 const isRollupLoading = ref(true);
 const isAddCouponDialogShown = ref<boolean>(false);
@@ -509,19 +500,13 @@ onBeforeMount(() => {
 
 onMounted(async () => {
     withLoading(async () => {
-        const promises: Promise<void | AccountBalance | CreditCard[]>[] = [
-            billingStore.getBalance(),
-            billingStore.getCoupon(),
-            billingStore.getCreditCards(),
-            billingStore.getProjectUsagePriceModel(),
-        ];
-
-        if (configStore.state.config.nativeTokenPaymentsEnabled) {
-            promises.push(billingStore.getNativePaymentsHistory());
-        }
-
         try {
-            await Promise.all(promises);
+            await Promise.all([
+                billingStore.getBalance(),
+                billingStore.getCoupon(),
+                billingStore.getCreditCards(),
+                billingStore.getProjectUsagePriceModel(),
+            ]);
         } catch (error) {
             notify.notifyError(error, AnalyticsErrorEventSource.BILLING_AREA);
         }
