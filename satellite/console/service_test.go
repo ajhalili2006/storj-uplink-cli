@@ -8381,8 +8381,7 @@ func TestGetFailedInvoice(t *testing.T) {
 		require.NoError(t, err)
 
 		invoice, err := service.Payments().GetFailedInvoice(userCtx)
-		require.Error(t, err) // Should return ErrNotFound
-		require.True(t, console.ErrNotFound.Has(err))
+		require.NoError(t, err)
 		require.Nil(t, invoice)
 
 		customerID, err := sat.DB.StripeCoinPayments().Customers().GetCustomerID(ctx, user.ID)

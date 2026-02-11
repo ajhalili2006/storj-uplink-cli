@@ -1290,7 +1290,7 @@ func (payment Payments) GetFailedInvoice(ctx context.Context) (_ *BillingHistory
 	}
 
 	if invoice == nil {
-		return nil, ErrNotFound.New("no failed invoices found")
+		return nil, nil
 	}
 
 	return &BillingHistoryItem{
