@@ -76,6 +76,7 @@ import (
 	"storj.io/storj/satellite/reputation"
 	srevocation "storj.io/storj/satellite/revocation"
 	"storj.io/storj/satellite/snopayouts"
+	"storj.io/storj/satellite/taskqueue"
 	sndebug "storj.io/storj/shared/debug"
 	"storj.io/storj/shared/modular/config"
 	"storj.io/storj/shared/modular/eventkit"
@@ -296,6 +297,7 @@ func Module(ball *mud.Ball) {
 	repaircsv.Module(ball)
 	reputation.Module(ball)
 	jobq.Module(ball)
+	taskqueue.Module(ball)
 	healthcheck.Module(ball)
 	mud.RegisterInterfaceImplementation[queue.RepairQueue, *jobq.RepairJobQueue](ball)
 	eventing.Module(ball)
