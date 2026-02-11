@@ -143,6 +143,10 @@ func (s *SpannerAdapter) DeleteAllBucketObjects(ctx context.Context, opts Delete
 
 		// TODO(spanner): see if it would be better to avoid batching altogether here.
 		_, err = s.client.ReadWriteTransactionWithOptions(ctx, func(ctx context.Context, tx *spanner.ReadWriteTransaction) error {
+			// Reset counters in case the transaction is retried.
+			lastDeletedObject = ObjectKey("")
+			deletedObjects = 0
+			deletedSegments = 0
 			deleteSegments := []*spanner.Mutation{}
 
 			iter := tx.QueryWithOptions(ctx, spanner.Statement{
