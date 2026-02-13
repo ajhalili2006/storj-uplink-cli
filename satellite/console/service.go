@@ -4913,12 +4913,13 @@ func (s *Service) DeleteProjectMembersAndInvitations(ctx context.Context, projec
 	}
 
 	projectID = isMember.project.ID
+	ownerID := isMember.project.OwnerID
 
 	var userIDs []uuid.UUID
 	var invitedEmails []string
 
 	for _, email := range data.Emails {
-		invite, err := s.store.ProjectInvitations().Get(ctx, projectID, email)
+		_, err = s.store.ProjectInvitations().Get(ctx, projectID, email)
 		if err == nil {
 			invitedEmails = append(invitedEmails, email)
 			continue
@@ -4927,24 +4928,27 @@ func (s *Service) DeleteProjectMembersAndInvitations(ctx context.Context, projec
 			return Error.Wrap(err)
 		}
 
-		user, err := s.store.Users().GetByEmailAndTenant(ctx, email, user.TenantID)
-		if err != nil {
-			if invite == nil {
-				return ErrValidation.New(teamMemberDoesNotExistErrMsg, email)
-			}
-			invitedEmails = append(invitedEmails, email)
-			continue
-		}
-
-		isOwner, _, err := s.isProjectOwner(ctx, user.ID, projectID)
-		if isOwner {
-			return ErrValidation.New(projectOwnerDeletionForbiddenErrMsg, user.Email)
-		}
-		if err != nil && !ErrUnauthorized.Has(err) {
+		activeUser, nonActiveUsers, err := s.store.Users().GetByEmailAndTenantWithUnverified(ctx, email, user.TenantID)
+		if err != nil && !errs.Is(err, sql.ErrNoRows) {
 			return Error.Wrap(err)
 		}
 
-		userIDs = append(userIDs, user.ID)
+		if activeUser == nil && len(nonActiveUsers) == 0 {
+			return ErrValidation.New(teamMemberDoesNotExistErrMsg, email)
+		}
+
+		var toBeDeletedUserID uuid.UUID
+		if activeUser != nil {
+			toBeDeletedUserID = activeUser.ID
+		} else if len(nonActiveUsers) > 0 {
+			toBeDeletedUserID = nonActiveUsers[0].ID
+		}
+
+		if toBeDeletedUserID == ownerID {
+			return ErrValidation.New(projectOwnerDeletionForbiddenErrMsg, email)
+		}
+
+		userIDs = append(userIDs, toBeDeletedUserID)
 	}
 
 	// delete project members in transaction scope
